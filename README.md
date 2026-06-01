@@ -6,25 +6,27 @@
 
 - 读取 `data/paper` 中的 PDF 论文；
 - 将论文文本切分成 chunk；
-- 使用本机 Ollama embedding 模型生成向量；
+- 调用 OpenAI-compatible embedding API 生成向量；
 - 用 FAISS 在本地保存向量索引；
 - 根据问题检索相关论文片段；
-- 调用本机 Ollama chat 模型回答问题；
+- 调用 OpenAI-compatible chat API 回答问题；
 - 返回答案对应的来源论文、页码、chunk 编号和原文片段；
-- 保留 DeepSeek / OpenAI-compatible API 的外部模型接口。
+- 保留 DeepSeek chat 和本机 Ollama 的可选接口。
 
 ## 当前默认模型
 
-当前 `.env` 默认使用本机 Ollama：
+当前 `.env` 默认使用 OpenAI-compatible API：
 
 ```env
-LLM_PROVIDER=ollama
-EMBEDDING_PROVIDER=ollama
-OLLAMA_CHAT_MODEL=deepseek-r1:1.5b
-OLLAMA_EMBED_MODEL=qwen3-embedding:0.6b
+LLM_PROVIDER=openai
+EMBEDDING_PROVIDER=openai
+OPENAI_API_KEY=你的_api_key
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_CHAT_MODEL=gpt-4o-mini
+OPENAI_EMBED_MODEL=text-embedding-3-small
 ```
 
-这两个模型是根据当前机器上的 `ollama list` 配置的。如果以后换模型，直接改 `.env` 即可。
+如果你用的是兼容 OpenAI 协议的第三方服务，把 `OPENAI_BASE_URL` 改成服务商给的 `/v1` 地址，并把 `OPENAI_CHAT_MODEL`、`OPENAI_EMBED_MODEL` 改成该服务支持的模型名即可。
 
 ## 环境说明
 
@@ -33,7 +35,7 @@ OLLAMA_EMBED_MODEL=qwen3-embedding:0.6b
 - Python 3.12
 - `uv`
 - LangChain
-- Ollama
+- OpenAI-compatible API
 - FAISS
 - PyPDF / PyMuPDF
 
@@ -65,6 +67,21 @@ uv sync
 - `qa.py`：一次完整问答流程；
 - `ui.py`：Rich 终端输出、进度条和来源表格。
 
+建议阅读顺序：
+
+1. 先看 `main.py`，理解程序入口只负责启动 Typer CLI；
+2. 再看 `paper_assistant_rag/cli.py`，理解 `index`、`ask`、`models` 三个命令分别调用哪些函数；
+3. 重点看 `paper_assistant_rag/qa.py`，这里是一次提问的主流程：检查索引、加载向量库、检索片段、组装 prompt、调用模型、打印答案；
+4. 然后看 `paper_assistant_rag/indexing.py`，理解建索引流程：读取 PDF、切 chunk、生成 embedding、保存 FAISS；
+5. 再分别看 `documents.py`、`retrieval.py`、`models.py`、`settings.py`，它们是主流程调用的支撑模块；
+6. 最后看 `ui.py` 和 `paths.py`，它们主要是终端展示和默认路径配置。
+
+如果只想抓住主线，优先读：
+
+```text
+main.py -> paper_assistant_rag/cli.py -> paper_assistant_rag/qa.py
+```
+
 ## 常用命令
 
 查看当前模型配置：
@@ -93,7 +110,7 @@ uv run python main.py ask "2019年的图神经网络多实例学习论文主要�
 
 1. 读取 PDF；
 2. 切分论文文本；
-3. 调用 Ollama embedding 模型给每个 chunk 生成向量；
+3. 调用 embedding API 给每个 chunk 生成向量；
 4. 保存 FAISS 索引；
 5. 再检索并调用 chat 模型回答。
 
@@ -105,7 +122,7 @@ uv run python main.py ask "2019年的图神经网络多实例学习论文主要�
 - 生成 embedding：显示 chunk 处理进度；
 - 加载索引、检索片段、生成回答：显示运行状态提示。
 
-注意：本机 Ollama 生成回答时没有准确百分比，所以这里只显示“正在调用模型生成回答”的状态提示，而不是百分比进度条。
+注意：模型服务生成回答时没有准确百分比，所以这里只显示“正在调用模型生成回答”的状态提示，而不是百分比进度条。
 
 默认情况下，检索会尽量把论文 References / 参考文献列表排到后面，避免模型把“被引用论文”误当成“当前论文的方法”。如果你在做 Related Work 检索，需要包含参考文献片段，可以加：
 
@@ -113,9 +130,20 @@ uv run python main.py ask "2019年的图神经网络多实例学习论文主要�
 uv run python main.py ask "这些论文引用了哪些图结构多实例学习相关工作？" --include-references
 ```
 
-## 使用外部 API
+## 模型 API 配置
 
-默认使用本机 Ollama。如果想把聊天模型切换到 DeepSeek，在 `.env` 里改成：
+如果你的 API 同时支持 chat 和 embedding，推荐统一走 OpenAI-compatible 配置：
+
+```env
+LLM_PROVIDER=openai
+EMBEDDING_PROVIDER=openai
+OPENAI_API_KEY=你的_api_key
+OPENAI_BASE_URL=https://your-compatible-endpoint/v1
+OPENAI_CHAT_MODEL=your-chat-model
+OPENAI_EMBED_MODEL=your-embedding-model
+```
+
+如果只想把聊天模型切换到 DeepSeek，在 `.env` 里改成：
 
 ```env
 LLM_PROVIDER=deepseek
@@ -124,13 +152,29 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_CHAT_MODEL=deepseek-chat
 ```
 
-Embedding 默认仍建议使用本机 Ollama，因为 DeepSeek 主要用于 chat。如果你有 OpenAI-compatible embedding 接口，可以这样配置：
+DeepSeek 主要用于 chat；如果不再使用本机 Ollama，embedding 仍需要另配一个 OpenAI-compatible embedding 接口：
 
 ```env
 EMBEDDING_PROVIDER=openai
 OPENAI_API_KEY=你的_api_key
 OPENAI_BASE_URL=https://your-compatible-endpoint/v1
 OPENAI_EMBED_MODEL=your-embedding-model
+```
+
+切换 embedding 模型或 embedding 服务后，旧 FAISS 索引不能继续复用，需要重建：
+
+```powershell
+uv run python main.py index --force
+```
+
+如果以后还想临时切回本机 Ollama，可以把 `.env` 改回：
+
+```env
+LLM_PROVIDER=ollama
+EMBEDDING_PROVIDER=ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_CHAT_MODEL=deepseek-r1:1.5b
+OLLAMA_EMBED_MODEL=qwen3-embedding:0.6b
 ```
 
 ## 关于 uv cache

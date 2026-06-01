@@ -1,3 +1,5 @@
+"""Typer command definitions that expose index, append, ask, and models commands."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,7 +8,7 @@ from typing import Annotated
 import typer
 from rich.table import Table
 
-from paper_assistant_rag.indexing import build_index
+from paper_assistant_rag.indexing import append_to_index, build_index
 from paper_assistant_rag.paths import DEFAULT_INDEX_DIR, DEFAULT_PAPER_DIR
 from paper_assistant_rag.qa import ask_question
 from paper_assistant_rag.settings import Settings
@@ -33,6 +35,30 @@ def index_command(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         force=force,
+    )
+
+
+@app.command(name="append")
+def append_command(
+    paper_dir: Annotated[Path, typer.Option(help="Directory containing PDF papers.")] = DEFAULT_PAPER_DIR,
+    index_dir: Annotated[Path, typer.Option(help="Directory used to load/save the FAISS index.")] = DEFAULT_INDEX_DIR,
+    chunk_size: Annotated[int, typer.Option(help="Characters per chunk.")] = 1000,
+    chunk_overlap: Annotated[int, typer.Option(help="Overlapping characters between chunks.")] = 180,
+    skip_existing: Annotated[
+        bool,
+        typer.Option(
+            "--skip-existing/--allow-duplicates",
+            help="Skip PDFs whose filename is already present in the index.",
+        ),
+    ] = True,
+) -> None:
+    """Append new PDFs to an existing FAISS vector index."""
+    append_to_index(
+        paper_dir=paper_dir,
+        index_dir=index_dir,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        skip_existing=skip_existing,
     )
 
 
@@ -73,13 +99,15 @@ def models_command() -> None:
     table.add_column("Value")
     table.add_row("LLM_PROVIDER", settings.llm_provider)
     table.add_row("EMBEDDING_PROVIDER", settings.embedding_provider)
-    table.add_row("OLLAMA_BASE_URL", settings.ollama_base_url)
-    table.add_row("OLLAMA_CHAT_MODEL", settings.ollama_chat_model)
-    table.add_row("OLLAMA_EMBED_MODEL", settings.ollama_embed_model)
-    table.add_row("DEEPSEEK_BASE_URL", settings.deepseek_base_url)
-    table.add_row("DEEPSEEK_CHAT_MODEL", settings.deepseek_chat_model)
-    table.add_row("OPENAI_BASE_URL", settings.openai_base_url or "")
-    table.add_row("OPENAI_CHAT_MODEL", settings.openai_chat_model)
-    table.add_row("OPENAI_EMBED_MODEL", settings.openai_embed_model)
+    if settings.llm_provider == "ollama" or settings.embedding_provider == "ollama":
+        table.add_row("OLLAMA_BASE_URL", settings.ollama_base_url)
+        table.add_row("OLLAMA_CHAT_MODEL", settings.ollama_chat_model)
+        table.add_row("OLLAMA_EMBED_MODEL", settings.ollama_embed_model)
+    if settings.llm_provider == "deepseek":
+        table.add_row("DEEPSEEK_BASE_URL", settings.deepseek_base_url)
+        table.add_row("DEEPSEEK_CHAT_MODEL", settings.deepseek_chat_model)
+    if settings.llm_provider == "openai" or settings.embedding_provider == "openai":
+        table.add_row("OPENAI_BASE_URL", settings.openai_base_url or "")
+        table.add_row("OPENAI_CHAT_MODEL", settings.openai_chat_model)
+        table.add_row("OPENAI_EMBED_MODEL", settings.openai_embed_model)
     console.print(table)
-

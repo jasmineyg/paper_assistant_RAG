@@ -1,3 +1,5 @@
+"""Rich console helpers for progress bars, safe terminal text, and source tables."""
+
 from __future__ import annotations
 
 import sys
@@ -54,4 +56,3 @@ def print_sources(source_rows: list[dict[str, str]], show_snippets: bool) -> Non
                 )
             )
             console.print(safe_for_console(row["snippet"]))
-

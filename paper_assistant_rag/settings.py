@@ -1,3 +1,5 @@
+"""Environment-driven configuration for model providers, API keys, and temperatures."""
+
 from __future__ import annotations
 
 import os
@@ -13,8 +15,8 @@ from paper_assistant_rag.paths import ROOT_DIR
 @dataclass(frozen=True)
 class Settings:
     # 这里集中保存模型和 API 配置，避免这些配置散落在代码各处。
-    llm_provider: Literal["ollama", "deepseek", "openai"] = "ollama"
-    embedding_provider: Literal["ollama", "openai"] = "ollama"
+    llm_provider: Literal["ollama", "deepseek", "openai"] = "openai"
+    embedding_provider: Literal["ollama", "openai"] = "openai"
     ollama_base_url: str = "http://localhost:11434"
     ollama_chat_model: str = "deepseek-r1:1.5b"
     ollama_embed_model: str = "qwen3-embedding:0.6b"
@@ -32,8 +34,8 @@ class Settings:
         # 每次运行命令时读取 .env，这样改模型或 API key 不需要改代码。
         load_dotenv(ROOT_DIR / ".env")
         return cls(
-            llm_provider=_env_choice("LLM_PROVIDER", "ollama", {"ollama", "deepseek", "openai"}),
-            embedding_provider=_env_choice("EMBEDDING_PROVIDER", "ollama", {"ollama", "openai"}),
+            llm_provider=_env_choice("LLM_PROVIDER", "openai", {"ollama", "deepseek", "openai"}),
+            embedding_provider=_env_choice("EMBEDDING_PROVIDER", "openai", {"ollama", "openai"}),
             ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             ollama_chat_model=os.getenv("OLLAMA_CHAT_MODEL", "deepseek-r1:1.5b"),
             ollama_embed_model=os.getenv("OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b"),
@@ -60,4 +62,3 @@ def _env_choice(name: str, default: str, choices: set[str]) -> str:
         allowed = ", ".join(sorted(choices))
         raise typer.BadParameter(f"{name} must be one of: {allowed}")
     return value
-

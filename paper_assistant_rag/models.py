@@ -1,3 +1,5 @@
+"""Factory functions that build chat LLMs and embedding models from Settings."""
+
 from __future__ import annotations
 
 import typer
@@ -19,7 +21,7 @@ def build_embeddings(settings: Settings):
     if not settings.openai_api_key:
         raise typer.BadParameter(
             "OPENAI_API_KEY is required when EMBEDDING_PROVIDER=openai. "
-            "DeepSeek is kept for chat; use Ollama or an OpenAI-compatible embedding API for embeddings."
+            "Use an OpenAI-compatible embedding API and set OPENAI_BASE_URL/OPENAI_EMBED_MODEL if needed."
         )
     return OpenAIEmbeddings(
         model=settings.openai_embed_model,
@@ -56,4 +58,3 @@ def build_llm(settings: Settings):
         base_url=settings.openai_base_url,
         temperature=settings.temperature,
     )
-

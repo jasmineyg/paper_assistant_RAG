@@ -1,3 +1,5 @@
+"""Package initialization for shared warnings and package-level setup."""
+
 from __future__ import annotations
 
 import warnings
@@ -7,4 +9,3 @@ warnings.filterwarnings(
     message=r"`langchain-community` is being sunset.*",
     category=DeprecationWarning,
 )
-
