@@ -1,23 +1,43 @@
-"""End-to-end question answering flow: ensure index, retrieve chunks, call LLM, print answer."""
+"""End-to-end conversational RAG flow: retrieve chunks, call LLM, persist memory."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_classic.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
+from langchain_core.runnables import RunnableLambda
+from langchain_core.runnables.history import RunnableWithMessageHistory
 from rich.markdown import Markdown
 
 from paper_assistant_rag.indexing import build_index, index_exists, load_index
+from paper_assistant_rag.memory import clear_session_history, get_session_history
 from paper_assistant_rag.models import build_llm
 from paper_assistant_rag.retrieval import (
     clean_model_output,
     ensure_answer_citations,
     hybrid_search_with_score,
-    make_context,
+    normalize_text,
     select_retrieval_results,
 )
 from paper_assistant_rag.settings import Settings
 from paper_assistant_rag.ui import console, print_sources, safe_for_console
+
+
+CONTEXTUALIZE_QUESTION_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "你会根据历史对话和用户最新问题，改写出一个可以独立检索论文知识库的问题。"
+            "如果最新问题本身已经完整，就原样输出。"
+            "只输出改写后的检索问题，不要回答问题。",
+        ),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}"),
+    ]
+)
 
 
 ANSWER_PROMPT = ChatPromptTemplate.from_messages(
@@ -26,28 +46,48 @@ ANSWER_PROMPT = ChatPromptTemplate.from_messages(
             "system",
             "你是领域论文知识库助手。只能基于给定论文片段回答，不能编造。"
             "不要把 References/参考文献列表中的被引用论文误当作当前论文的方法。"
+            "历史对话只用于理解用户追问和代词，事实依据必须来自本轮检索到的论文片段。"
             "必须用中文回答，并在关键结论后引用来源编号，例如 [S1] 或 [S2]。"
             "如果片段不足以回答，要明确说明不足。",
         ),
+        MessagesPlaceholder("chat_history"),
         (
             "human",
-            "问题：\n{question}\n\n检索到的论文片段：\n{context}\n\n"
-            "请给出简洁但有用的回答，最后说明不确定性。",
+            "问题：\n{input}\n\n检索到的论文片段：\n{context}\n\n"
+            "请用中文给出结构化回答。若问题涉及方法流程，请按 5-8 个步骤展开，"
+            "每一步说明输入、处理方式、输出或作用，并在关键结论后引用来源编号。"
+            "最后单独说明不确定性。"
+            "回答不要少于 500 字，除非检索片段确实不足。",
         ),
     ]
 )
+
+
+DOCUMENT_PROMPT = PromptTemplate.from_template(
+    "[{source_id}] {source} | page {page} | chunk {chunk_id} | score {score}\n{page_content}"
+)
+
+MAX_HISTORY_MESSAGES = 12
+MAX_CHARS_PER_SOURCE = 1200
 
 
 def ask_question(
     question: str,
     paper_dir: Path,
     index_dir: Path,
+    memory_db: Path,
+    session_id: str,
+    reset_memory: bool,
     k: int,
     rebuild: bool,
     show_snippets: bool,
     include_references: bool,
 ) -> None:
     settings = Settings.from_env()
+    if reset_memory:
+        clear_session_history(session_id=session_id, db_path=memory_db)
+        console.print(f"[yellow]已清空会话记忆：{session_id}[/yellow]")
+
     # 如果用户还没建索引，第一次提问时自动建一个最小索引。
     if rebuild or not index_exists(index_dir):
         console.print("[yellow]未发现索引，先自动构建索引。第一次会比较慢。[/yellow]")
@@ -61,18 +101,112 @@ def ask_question(
 
     with console.status("[cyan]正在加载 FAISS 索引...[/cyan]", spinner="dots"):
         vectorstore = load_index(index_dir, settings)
-    # 先多取一些候选，再做参考文献过滤，避免最相关的正文片段被挤掉。
-    with console.status("[cyan]正在混合检索相关论文片段...[/cyan]", spinner="dots"):
-        raw_results = hybrid_search_with_score(vectorstore, question, k=max(k * 5, k + 10))
-    results = select_retrieval_results(raw_results, k=k, include_references=include_references)
-    context, source_rows = make_context(results, max_chars_per_source=1200)
 
-    # LangChain 的 LCEL 写法：prompt 的输出直接传给 LLM。
-    with console.status("[cyan]正在调用模型生成回答...[/cyan]", spinner="dots"):
-        response = (ANSWER_PROMPT | build_llm(settings)).invoke({"question": question, "context": context})
-    answer = ensure_answer_citations(clean_model_output(str(response.content)), source_rows)
+    chain = build_conversational_rag_chain(
+        vectorstore=vectorstore,
+        settings=settings,
+        memory_db=memory_db,
+        k=k,
+        include_references=include_references,
+    )
+    with console.status("[cyan]正在结合对话记忆检索并生成回答...[/cyan]", spinner="dots"):
+        result = chain.invoke(
+            {"input": question},
+            config={"configurable": {"session_id": session_id}},
+        )
+
+    source_rows = source_rows_from_documents(result["context"], max_chars_per_source=MAX_CHARS_PER_SOURCE)
+    answer = str(result["answer"])
 
     console.print("\n[bold]Answer[/bold]")
     console.print(Markdown(safe_for_console(answer)))
     console.print()
     print_sources(source_rows, show_snippets=show_snippets)
+
+
+def build_conversational_rag_chain(
+    vectorstore,
+    settings: Settings,
+    memory_db: Path,
+    k: int,
+    include_references: bool,
+):
+    llm = build_llm(settings)
+    retriever = build_hybrid_retriever(vectorstore, k=k, include_references=include_references)
+    history_aware_retriever = create_history_aware_retriever(
+        llm=llm,
+        retriever=retriever,
+        prompt=CONTEXTUALIZE_QUESTION_PROMPT,
+    )
+    answer_chain = create_stuff_documents_chain(
+        llm=llm,
+        prompt=ANSWER_PROMPT,
+        document_prompt=DOCUMENT_PROMPT,
+    )
+    rag_chain = create_retrieval_chain(history_aware_retriever, answer_chain) | RunnableLambda(finalize_chain_result)
+
+    return RunnableWithMessageHistory(
+        rag_chain,
+        lambda current_session_id: get_session_history(
+            session_id=current_session_id,
+            db_path=memory_db,
+            max_messages=MAX_HISTORY_MESSAGES,
+        ),
+        input_messages_key="input",
+        history_messages_key="chat_history",
+        output_messages_key="answer",
+    )
+
+
+def build_hybrid_retriever(vectorstore, k: int, include_references: bool):
+    def retrieve(query: str) -> list[Document]:
+        # 先多取一些候选，再做参考文献过滤，避免最相关的正文片段被挤掉。
+        raw_results = hybrid_search_with_score(vectorstore, query, k=max(k * 5, k + 10))
+        selected_results = select_retrieval_results(
+            raw_results,
+            k=k,
+            include_references=include_references,
+        )
+        return documents_with_source_metadata(selected_results)
+
+    return RunnableLambda(retrieve)
+
+
+def finalize_chain_result(result: dict) -> dict:
+    source_rows = source_rows_from_documents(result["context"], max_chars_per_source=MAX_CHARS_PER_SOURCE)
+    finalized_result = dict(result)
+    finalized_result["answer"] = ensure_answer_citations(
+        clean_model_output(str(result["answer"])),
+        source_rows,
+    )
+    return finalized_result
+
+
+def documents_with_source_metadata(results: list[tuple[Document, float]]) -> list[Document]:
+    documents: list[Document] = []
+    for source_number, (doc, score) in enumerate(results, start=1):
+        metadata = dict(doc.metadata)
+        metadata["source_id"] = f"S{source_number}"
+        metadata["source"] = str(metadata.get("source", "unknown"))
+        metadata["page"] = str(metadata.get("page", "?"))
+        metadata["chunk_id"] = str(metadata.get("chunk_id", "?"))
+        metadata["score"] = f"{score:.4f}"
+        documents.append(Document(page_content=normalize_text(doc.page_content), metadata=metadata))
+    return documents
+
+
+def source_rows_from_documents(docs: list[Document], max_chars_per_source: int) -> list[dict[str, str]]:
+    source_rows: list[dict[str, str]] = []
+    for doc in docs:
+        metadata = doc.metadata
+        source_rows.append(
+            {
+                "id": str(metadata.get("source_id", "?")),
+                "source": str(metadata.get("source", "unknown")),
+                "page": str(metadata.get("page", "?")),
+                "chunk": str(metadata.get("chunk_id", "?")),
+                "score": str(metadata.get("score", "?")),
+                "snippet": normalize_text(doc.page_content)[:max_chars_per_source],
+            }
+        )
+    return source_rows

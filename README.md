@@ -11,6 +11,7 @@
 - 根据问题检索相关论文片段；
 - 调用 OpenAI-compatible chat API 回答问题；
 - 返回答案对应的来源论文、页码、chunk 编号和原文片段；
+- 用 SQLite 保存 `ask` 的会话历史，支持连续追问和上下文代词；
 - 保留 DeepSeek chat 和本机 Ollama 的可选接口。
 
 ## 当前默认模型
@@ -64,14 +65,15 @@ uv sync
 - `documents.py`：PDF 读取、metadata 生成和文本切分；
 - `indexing.py`：FAISS 索引构建、保存和加载；
 - `retrieval.py`：检索结果筛选、上下文拼接和回答清理；
-- `qa.py`：一次完整问答流程；
+- `memory.py`：SQLite 对话历史读写；
+- `qa.py`：带对话记忆的问题改写、检索和回答流程；
 - `ui.py`：Rich 终端输出、进度条和来源表格。
 
 建议阅读顺序：
 
 1. 先看 `main.py`，理解程序入口只负责启动 Typer CLI；
 2. 再看 `paper_assistant_rag/cli.py`，理解 `index`、`ask`、`models` 三个命令分别调用哪些函数；
-3. 重点看 `paper_assistant_rag/qa.py`，这里是一次提问的主流程：检查索引、加载向量库、检索片段、组装 prompt、调用模型、打印答案；
+3. 重点看 `paper_assistant_rag/qa.py`，这里是提问主流程：检查索引、加载向量库、结合历史改写问题、检索片段、组装 prompt、调用模型、打印答案；
 4. 然后看 `paper_assistant_rag/indexing.py`，理解建索引流程：读取 PDF、切 chunk、生成 embedding、保存 FAISS；
 5. 再分别看 `documents.py`、`retrieval.py`、`models.py`、`settings.py`，它们是主流程调用的支撑模块；
 6. 最后看 `ui.py` 和 `paths.py`，它们主要是终端展示和默认路径配置。
@@ -100,6 +102,25 @@ uv run python main.py index --force
 
 ```powershell
 uv run python main.py ask "2019年的图神经网络多实例学习论文主要方法是什么？"
+```
+
+`ask` 默认会使用 `default` 会话保存上下文，因此可以直接连续追问：
+
+```powershell
+uv run python main.py ask "MI-GNN 这篇论文主要解决什么问题？"
+uv run python main.py ask "它的方法流程是什么？"
+```
+
+如果要隔离不同主题，可以换一个会话名：
+
+```powershell
+uv run python main.py ask "这组论文的共同问题是什么？" --session graph-mil
+```
+
+如果要重新开始当前会话：
+
+```powershell
+uv run python main.py ask "重新总结这些论文" --reset-memory
 ```
 
 如果索引还不存在，`ask` 会自动先建立索引。

@@ -9,3 +9,8 @@ warnings.filterwarnings(
     message=r"`langchain-community` is being sunset.*",
     category=DeprecationWarning,
 )
+warnings.filterwarnings(
+    "ignore",
+    message=r"RunnableWithMessageHistory is deprecated.*",
+    category=Warning,
+)

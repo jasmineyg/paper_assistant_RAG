@@ -9,7 +9,7 @@ import typer
 from rich.table import Table
 
 from paper_assistant_rag.indexing import append_to_index, build_index
-from paper_assistant_rag.paths import DEFAULT_INDEX_DIR, DEFAULT_PAPER_DIR
+from paper_assistant_rag.paths import DEFAULT_INDEX_DIR, DEFAULT_MEMORY_DB, DEFAULT_PAPER_DIR
 from paper_assistant_rag.qa import ask_question
 from paper_assistant_rag.settings import Settings
 from paper_assistant_rag.ui import console
@@ -67,7 +67,13 @@ def ask_command(
     question: Annotated[str, typer.Argument(help="Question to answer from the paper knowledge base.")],
     paper_dir: Annotated[Path, typer.Option(help="Directory containing PDF papers.")] = DEFAULT_PAPER_DIR,
     index_dir: Annotated[Path, typer.Option(help="Directory used to load/save the FAISS index.")] = DEFAULT_INDEX_DIR,
-    k: Annotated[int, typer.Option(help="Number of source chunks to retrieve.")] = 5,
+    memory_db: Annotated[Path, typer.Option(help="SQLite database used to persist chat memory.")] = DEFAULT_MEMORY_DB,
+    session: Annotated[str, typer.Option(help="Conversation session id used for chat memory.")] = "default",
+    reset_memory: Annotated[
+        bool,
+        typer.Option("--reset-memory", help="Clear this session's chat memory before answering."),
+    ] = False,
+    k: Annotated[int, typer.Option(help="Number of source chunks to retrieve.")] = 10,
     rebuild: Annotated[bool, typer.Option("--rebuild", help="Rebuild the index before asking.")] = False,
     show_snippets: Annotated[
         bool,
@@ -78,11 +84,14 @@ def ask_command(
         typer.Option("--include-references", help="Allow bibliography/reference-list chunks in retrieval results."),
     ] = False,
 ) -> None:
-    """Ask one question and return an answer with source snippets."""
+    """Ask with persistent chat memory and return an answer with source snippets."""
     ask_question(
         question=question,
         paper_dir=paper_dir,
         index_dir=index_dir,
+        memory_db=memory_db,
+        session_id=session,
+        reset_memory=reset_memory,
         k=k,
         rebuild=rebuild,
         show_snippets=show_snippets,
