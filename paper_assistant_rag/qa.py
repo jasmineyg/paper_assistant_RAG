@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
+import typer
+from httpx import HTTPError
+from langchain_core._api.deprecation import LangChainDeprecationWarning
 from langchain_classic.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
 from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.history import RunnableWithMessageHistory
-from rich.markdown import Markdown
+from openai import OpenAIError
 
 from paper_assistant_rag.indexing import build_index, index_exists, load_index
 from paper_assistant_rag.memory import clear_session_history, get_session_history
@@ -23,7 +27,7 @@ from paper_assistant_rag.retrieval import (
     select_retrieval_results,
 )
 from paper_assistant_rag.settings import Settings
-from paper_assistant_rag.ui import console, print_sources, safe_for_console
+from paper_assistant_rag.ui import console, print_answer, print_sources, safe_for_console
 
 
 CONTEXTUALIZE_QUESTION_PROMPT = ChatPromptTemplate.from_messages(
@@ -71,6 +75,10 @@ MAX_HISTORY_MESSAGES = 12
 MAX_CHARS_PER_SOURCE = 1200
 
 
+class RetrievalServiceError(RuntimeError):
+    """Raised when the embedding-backed retrieval call fails."""
+
+
 def ask_question(
     question: str,
     paper_dir: Path,
@@ -109,17 +117,24 @@ def ask_question(
         k=k,
         include_references=include_references,
     )
-    with console.status("[cyan]正在结合对话记忆检索并生成回答...[/cyan]", spinner="dots"):
-        result = chain.invoke(
-            {"input": question},
-            config={"configurable": {"session_id": session_id}},
-        )
+    try:
+        with console.status("[cyan]正在结合对话记忆检索并生成回答...[/cyan]", spinner="dots"):
+            result = chain.invoke(
+                {"input": question},
+                config={"configurable": {"session_id": session_id}},
+            )
+    except RetrievalServiceError as error:
+        print_retrieval_error(error, settings)
+        raise typer.Exit(1) from error
+    except (OpenAIError, HTTPError) as error:
+        print_model_error(error, settings)
+        raise typer.Exit(1) from error
 
     source_rows = source_rows_from_documents(result["context"], max_chars_per_source=MAX_CHARS_PER_SOURCE)
     answer = str(result["answer"])
 
     console.print("\n[bold]Answer[/bold]")
-    console.print(Markdown(safe_for_console(answer)))
+    print_answer(answer)
     console.print()
     print_sources(source_rows, show_snippets=show_snippets)
 
@@ -145,23 +160,33 @@ def build_conversational_rag_chain(
     )
     rag_chain = create_retrieval_chain(history_aware_retriever, answer_chain) | RunnableLambda(finalize_chain_result)
 
-    return RunnableWithMessageHistory(
-        rag_chain,
-        lambda current_session_id: get_session_history(
-            session_id=current_session_id,
-            db_path=memory_db,
-            max_messages=MAX_HISTORY_MESSAGES,
-        ),
-        input_messages_key="input",
-        history_messages_key="chat_history",
-        output_messages_key="answer",
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*RunnableWithMessageHistory.*",
+            category=LangChainDeprecationWarning,
+        )
+        return RunnableWithMessageHistory(
+            rag_chain,
+            lambda current_session_id: get_session_history(
+                session_id=current_session_id,
+                db_path=memory_db,
+                max_messages=MAX_HISTORY_MESSAGES,
+            ),
+            input_messages_key="input",
+            history_messages_key="chat_history",
+            output_messages_key="answer",
+        )
 
 
 def build_hybrid_retriever(vectorstore, k: int, include_references: bool):
     def retrieve(query: str) -> list[Document]:
+        print_retrieval_query(query)
         # 先多取一些候选，再做参考文献过滤，避免最相关的正文片段被挤掉。
-        raw_results = hybrid_search_with_score(vectorstore, query, k=max(k * 5, k + 10))
+        try:
+            raw_results = hybrid_search_with_score(vectorstore, query, k=max(k * 5, k + 10))
+        except (OpenAIError, HTTPError) as error:
+            raise RetrievalServiceError(str(error)) from error
         selected_results = select_retrieval_results(
             raw_results,
             k=k,
@@ -170,6 +195,62 @@ def build_hybrid_retriever(vectorstore, k: int, include_references: bool):
         return documents_with_source_metadata(selected_results)
 
     return RunnableLambda(retrieve)
+
+
+def print_retrieval_query(query: str) -> None:
+    console.print("\n[bold]本轮检索问题[/bold]")
+    console.print(safe_for_console(query), markup=False)
+
+
+def print_retrieval_error(error: RetrievalServiceError, settings: Settings) -> None:
+    console.print("\n[bold red]检索失败：embedding 服务没有成功返回向量。[/bold red]")
+    console.print(
+        safe_for_console(
+            f"当前 embedding 配置：provider={settings.embedding_provider}, "
+            f"base_url={_embedding_base_url(settings)}, model={_embedding_model(settings)}"
+        )
+    )
+    console.print(safe_for_console(f"服务返回：{error}"))
+    console.print("这通常是 embedding 服务端 5xx、模型名不被该服务支持、额度/鉴权异常，或服务临时不可用。")
+
+
+def print_model_error(error: OpenAIError | HTTPError, settings: Settings) -> None:
+    console.print("\n[bold red]模型服务调用失败。[/bold red]")
+    console.print(
+        safe_for_console(
+            f"当前 chat 配置：provider={settings.llm_provider}, "
+            f"base_url={_chat_base_url(settings)}, model={_chat_model(settings)}"
+        )
+    )
+    console.print(safe_for_console(f"服务返回：{error}"))
+
+
+def _embedding_base_url(settings: Settings) -> str:
+    if settings.embedding_provider == "ollama":
+        return settings.ollama_base_url
+    return settings.openai_base_url or ""
+
+
+def _embedding_model(settings: Settings) -> str:
+    if settings.embedding_provider == "ollama":
+        return settings.ollama_embed_model
+    return settings.openai_embed_model
+
+
+def _chat_base_url(settings: Settings) -> str:
+    if settings.llm_provider == "ollama":
+        return settings.ollama_base_url
+    if settings.llm_provider == "deepseek":
+        return settings.deepseek_base_url
+    return settings.openai_base_url or ""
+
+
+def _chat_model(settings: Settings) -> str:
+    if settings.llm_provider == "ollama":
+        return settings.ollama_chat_model
+    if settings.llm_provider == "deepseek":
+        return settings.deepseek_chat_model
+    return settings.openai_chat_model
 
 
 def finalize_chain_result(result: dict) -> dict:

@@ -27,6 +27,9 @@ def build_embeddings(settings: Settings):
         model=settings.openai_embed_model,
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
+        # Some OpenAI-compatible embedding APIs reject LangChain's token-array
+        # requests. Send raw strings instead; callers already keep chunks small.
+        check_embedding_ctx_length=False,
     )
 
 

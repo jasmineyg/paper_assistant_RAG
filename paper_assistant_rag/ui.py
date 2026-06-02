@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
@@ -27,6 +28,18 @@ def safe_for_console(text: str) -> str:
     # Windows 终端有时不是 UTF-8，PDF 里又常有特殊字符；这里避免打印时报编码错误。
     encoding = console.file.encoding or sys.stdout.encoding or "utf-8"
     return text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+
+
+def print_answer(answer: str) -> None:
+    if _console_supports_markdown_unicode():
+        console.print(Markdown(safe_for_console(answer)))
+        return
+    console.print(safe_for_console(answer), markup=False)
+
+
+def _console_supports_markdown_unicode() -> bool:
+    encoding = (console.file.encoding or sys.stdout.encoding or "utf-8").lower().replace("-", "")
+    return not console.legacy_windows or encoding in {"utf8", "utf8sig"}
 
 
 def print_sources(source_rows: list[dict[str, str]], show_snippets: bool) -> None:
