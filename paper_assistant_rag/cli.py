@@ -1,4 +1,4 @@
-"""Typer command definitions that expose index, append, ask, and models commands."""
+"""Typer command definitions that expose index, append, ask, eval, and models commands."""
 
 from __future__ import annotations
 
@@ -8,8 +8,15 @@ from typing import Annotated
 import typer
 from rich.table import Table
 
+from paper_assistant_rag.evaluation import run_evaluation
 from paper_assistant_rag.indexing import append_to_index, build_index
-from paper_assistant_rag.paths import DEFAULT_INDEX_DIR, DEFAULT_MEMORY_DB, DEFAULT_PAPER_DIR
+from paper_assistant_rag.paths import (
+    DEFAULT_EVAL_DATASET,
+    DEFAULT_EVAL_RUN_DIR,
+    DEFAULT_INDEX_DIR,
+    DEFAULT_MEMORY_DB,
+    DEFAULT_PAPER_DIR,
+)
 from paper_assistant_rag.qa import ask_question
 from paper_assistant_rag.settings import Settings
 from paper_assistant_rag.ui import console
@@ -96,6 +103,64 @@ def ask_command(
         rebuild=rebuild,
         show_snippets=show_snippets,
         include_references=include_references,
+    )
+
+
+@app.command(name="eval")
+def eval_command(
+    dataset: Annotated[
+        Path,
+        typer.Option(help="Evaluation dataset JSON file."),
+    ] = DEFAULT_EVAL_DATASET,
+    index_dir: Annotated[
+        Path,
+        typer.Option(help="Directory used to load the FAISS index."),
+    ] = DEFAULT_INDEX_DIR,
+    memory_db: Annotated[
+        Path,
+        typer.Option(help="SQLite database used when answer generation is enabled."),
+    ] = DEFAULT_MEMORY_DB,
+    output_dir: Annotated[
+        Path,
+        typer.Option(help="Directory for JSON/CSV evaluation reports."),
+    ] = DEFAULT_EVAL_RUN_DIR,
+    k: Annotated[int, typer.Option(help="Number of source chunks to retrieve per item.")] = 10,
+    limit: Annotated[
+        int | None,
+        typer.Option(help="Run only the first N items for a smoke test."),
+    ] = None,
+    query_field: Annotated[
+        str,
+        typer.Option(help="Dataset field used as the RAG query: question or canonical_question."),
+    ] = "question",
+    include_references: Annotated[
+        bool,
+        typer.Option("--include-references", help="Allow bibliography/reference-list chunks in retrieval results."),
+    ] = False,
+    with_answers: Annotated[
+        bool,
+        typer.Option(
+            "--with-answers/--retrieval-only",
+            help="Run the full RAG answer chain, or only compute retrieval metrics.",
+        ),
+    ] = True,
+    session_prefix: Annotated[
+        str,
+        typer.Option(help="Session id prefix used when --with-answers is enabled."),
+    ] = "eval",
+) -> None:
+    """Run a curated RAG evaluation dataset and write metric reports."""
+    run_evaluation(
+        dataset_path=dataset,
+        index_dir=index_dir,
+        memory_db=memory_db,
+        output_dir=output_dir,
+        k=k,
+        limit=limit,
+        query_field=query_field,
+        include_references=include_references,
+        with_answers=with_answers,
+        session_prefix=session_prefix,
     )
 
 

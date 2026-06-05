@@ -14,7 +14,6 @@
 - **可追溯回答**：回答要求带 `[S1]`、`[S2]` 等来源引用，并在终端展示来源表格和原文片段，方便核验模型输出。
 - **连续追问能力**：使用 SQLite 保存会话历史，支持“它的方法流程是什么？”这类依赖上下文的追问。
 - **多模型兼容**：支持 OpenAI-compatible chat / embedding API，也保留 DeepSeek chat 和本地 Ollama 的可选接口。
-- **命令行体验**：基于 Typer 和 Rich 实现清晰的 CLI、进度条、状态提示和来源结果表格。
 
 ## 系统流程
 
@@ -36,7 +35,6 @@ user question + chat history
 
 ## 技术栈
 
-- Python 3.12
 - LangChain
 - FAISS
 - Typer
@@ -153,24 +151,6 @@ OPENAI_BASE_URL=https://your-compatible-endpoint/v1
 OPENAI_CHAT_MODEL=your-chat-model
 OPENAI_EMBED_MODEL=your-embedding-model
 TEMPERATURE=0.2
-```
-
-如果只想把聊天模型切换到 DeepSeek，可以配置：
-
-```env
-LLM_PROVIDER=deepseek
-DEEPSEEK_API_KEY=your_api_key
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_CHAT_MODEL=deepseek-chat
-```
-
-此时 embedding 仍需要单独配置，例如继续使用 OpenAI-compatible embedding：
-
-```env
-EMBEDDING_PROVIDER=openai
-OPENAI_API_KEY=your_api_key
-OPENAI_BASE_URL=https://your-compatible-endpoint/v1
-OPENAI_EMBED_MODEL=your-embedding-model
 ```
 
 如果使用本地 Ollama：

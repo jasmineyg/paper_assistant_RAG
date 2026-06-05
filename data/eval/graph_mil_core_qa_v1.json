@@ -1,0 +1,1823 @@
+{
+  "dataset_id": "graph_mil_core_qa_v1",
+  "version": "0.1.0",
+  "language": "zh-CN",
+  "purpose": "评估 Paper Assistant RAG 在图上的多实例学习论文语料上的最终回答质量、论文阅读能力，以及面对缩写、别名、省略作者年份和中英混合查询时的模糊检索能力。",
+  "created_from": {
+    "survey_pdf": "D:\\AResearch\\图上的多实例-综述论文\\submit_v3\\Mark_Graph_based_MIL_Survey_Springer_re2.0final.pdf",
+    "corpus_dir": "data/paper",
+    "index_dir": "vectorstore/faiss_index",
+    "selection_rule": "优先选择综述中作为方法脉络节点出现的论文，覆盖 graph kernel、instance-relation kernel、GNN-MIL 基础模型、WSI/病理图建模和自适应/任务感知图学习。"
+  },
+  "query_design": {
+    "question_field": "自然用户问法，刻意包含缩写、别名、省略作者年份、中英混合或口语化表达，用于真实检索评测。",
+    "canonical_question_field": "精确评测意图，供人工评分和调试使用；不要把它作为 RAG 输入。",
+    "alias_terms_field": "该问题希望系统能理解或关联到的缩写、别名和关键词。"
+  },
+  "global_rubric": {
+    "answer_correctness": 0.45,
+    "evidence_support": 0.3,
+    "academic_reading_quality": 0.15,
+    "citation_format": 0.1,
+    "notes": [
+      "答案不要求逐字匹配 expected_answer_points，但应覆盖主要要点。",
+      "关键结论后必须带 [S1]、[S2] 等来源引用。",
+      "如果检索片段不足，好的回答应明确说明不确定性，而不是补充语料外事实。"
+    ]
+  },
+  "selected_papers": [
+    {
+      "paper_id": "p01",
+      "source": "zhou2009.pdf.pdf",
+      "survey_ref": "[13]",
+      "role": "graph-kernel foundation",
+      "why_core": "综述将其作为 graph-based MIL 的早期基础工作，提出把 bag 作为整体、把实例视为非独立同分布，并给出 MIGraph 与 miGraph。"
+    },
+    {
+      "paper_id": "p02",
+      "source": "Hajimirsadeghi 等 - 2015 - Visual recognition by counting instances A multi-instance cardinality potential kernel.pdf",
+      "survey_ref": "[30]",
+      "role": "instance-relation kernel",
+      "why_core": "代表 instance-relation-based kernel 路线，用 cardinality potential 表达实例数量关系，补足传统 graph-kernel 之外的关系建模。"
+    },
+    {
+      "paper_id": "p03",
+      "source": "Tu 等 - 2019 - Multiple instance learning with graph neural netwo.pdf",
+      "survey_ref": "[15]",
+      "role": "GNN-MIL foundation",
+      "why_core": "综述将其视为 GNN 首次引入 MIL 的基础方法，提出 bag-to-graph、GNN node update 与 graph aggregation 的主流程。"
+    },
+    {
+      "paper_id": "p04",
+      "source": "Raju 等 - 2020 - Graph Attention Multi-instance Learning for Accurate Colorectal Cancer Staging.pdf",
+      "survey_ref": "[33]",
+      "role": "early WSI graph-attention application",
+      "why_core": "代表早期将图注意力和 MIL 用于结直肠癌 WSI 分期的工作，强调组织结构对病理判别的重要性。"
+    },
+    {
+      "paper_id": "p05",
+      "source": "Chen 等 - 2021 - Whole Slide Images are 2D Point Clouds Context-Aware Survival Prediction Using Patch-Based Graph Co.pdf",
+      "survey_ref": "[36]",
+      "role": "spatial WSI graph modeling",
+      "why_core": "提出把 WSI 看作二维点云并用 Patch-GCN 做上下文感知生存预测，是 WSI 空间图建模的代表。"
+    },
+    {
+      "paper_id": "p06",
+      "source": "Pal 等 - 2022 - Bag Graph Multiple Instance Learning Using Bayesi.pdf",
+      "survey_ref": "[37]",
+      "role": "Bayesian graph learning",
+      "why_core": "代表在 MIL 中处理图结构未知或噪声的问题，用 Bayesian GNN 对 bag graph 的依赖关系和不确定性建模。"
+    },
+    {
+      "paper_id": "p07",
+      "source": "Guan 等 - 2022 - Node-aligned graph convolutional network for whole-slide image representation and classification.pdf",
+      "survey_ref": "[38]",
+      "role": "node alignment for WSI",
+      "why_core": "针对不同 WSI 之间 patch 节点无序且不对应的问题，提出 node-aligned GCN 保留局部结构和全局分布。"
+    },
+    {
+      "paper_id": "p08",
+      "source": "Shi 等 - 2023 - A Structure-Aware Hierarchical Graph-Based Multiple Instance Learning Framework for pT Staging in Hi.pdf",
+      "survey_ref": "[40]",
+      "role": "hierarchical histopathology graph",
+      "why_core": "代表多放大倍率、层级结构和 pT staging 场景中的图式 MIL，测试系统能否读出临床任务与结构建模之间的关系。"
+    },
+    {
+      "paper_id": "p09",
+      "source": "Zhao 等 - 2024 - Reinforced GNNs for Multiple Instance Learning.pdf",
+      "survey_ref": "[46]",
+      "role": "adaptive graph and architecture control",
+      "why_core": "代表用多智能体强化学习自适应控制 bag graph 与 GNN 层数，适合测试模型是否理解结构与聚合范围的联合选择。"
+    },
+    {
+      "paper_id": "p10",
+      "source": "Wang 等 - 2025 - TAD-Graph Enhancing Whole Slide Image Analysis via Task-Aware Subgraph Disentanglement.pdf",
+      "survey_ref": "[48]",
+      "role": "task-aware subgraph disentanglement",
+      "why_core": "代表较新的任务感知 WSI 图方法，将图分解为任务相关和任务无关子图，兼顾性能与可解释性。"
+    }
+  ],
+  "items": [
+    {
+      "id": "gmil-v1-001",
+      "type": "single_paper",
+      "category": "method_summary",
+      "difficulty": "medium",
+      "question": "那篇说 MIL 里实例不是 iid 的经典文章，核心到底做了什么？",
+      "canonical_question": "Zhou 2009 这篇论文为什么要把 MIL 中的实例看作 non-i.i.d. samples？它的核心贡献是什么？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "non-iid",
+        "非独立同分布",
+        "miGraph",
+        "MIGraph"
+      ],
+      "target_papers": [
+        "p01"
+      ],
+      "expected_answer_points": [
+        "传统 MIL 常把同一 bag 内实例当作独立同分布，忽略实例之间的结构关系。",
+        "论文主张把一个 bag 当作整体实体，实例是这个实体中相互关联的组成部分。",
+        "提出两类 graph-kernel 方法：显式构图的 MIGraph 和隐式构图/亲和矩阵式的 miGraph。",
+        "目标是利用实例关系改善 bag-level 相似度度量和分类。"
+      ],
+      "evidence": [
+        {
+          "source": "zhou2009.pdf.pdf",
+          "page": 1,
+          "chunk_id": 155,
+          "must_include_terms": [
+            "Non-I.I.D.",
+            "multi-instance learning"
+          ]
+        },
+        {
+          "source": "zhou2009.pdf.pdf",
+          "page": 1,
+          "chunk_id": 159,
+          "must_include_terms": [
+            "independently",
+            "relations",
+            "structure"
+          ]
+        },
+        {
+          "source": "zhou2009.pdf.pdf",
+          "page": 2,
+          "chunk_id": 165,
+          "must_include_terms": [
+            "MIGraph",
+            "miGraph"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要只回答 MIL 的基本定义；必须说明 non-i.i.d. 与图结构的关系。"
+      ]
+    },
+    {
+      "id": "gmil-v1-002",
+      "type": "single_paper",
+      "category": "method_comparison",
+      "difficulty": "hard",
+      "question": "MI-Graph 和 miGraph 有啥区别？哪个更省计算？",
+      "canonical_question": "请比较 Zhou 2009 中 MIGraph 和 miGraph 的构图方式与计算取舍。",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "MI-Graph",
+        "MIGraph",
+        "miGraph",
+        "图核"
+      ],
+      "target_papers": [
+        "p01"
+      ],
+      "expected_answer_points": [
+        "MIGraph 显式把 bag 构造成图，再基于节点和边关系设计图核。",
+        "miGraph 不显式枚举完整图结构，而是从实例亲和矩阵中隐式建模关系。",
+        "miGraph 的设计更强调计算效率，适合较大规模数据。",
+        "两者共同点是都试图让 bag 相似度反映实例间依赖，而不是只聚合孤立实例。"
+      ],
+      "evidence": [
+        {
+          "source": "zhou2009.pdf.pdf",
+          "page": 2,
+          "chunk_id": 165,
+          "must_include_terms": [
+            "MIGraph",
+            "bag",
+            "graph"
+          ]
+        },
+        {
+          "source": "zhou2009.pdf.pdf",
+          "page": 2,
+          "chunk_id": 166,
+          "must_include_terms": [
+            "miGraph",
+            "affinity matrices",
+            "clique"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要把 miGraph 说成显式边枚举方法。"
+      ]
+    },
+    {
+      "id": "gmil-v1-003",
+      "type": "single_paper",
+      "category": "evidence_reading",
+      "difficulty": "medium",
+      "question": "miGraph 这种图核到底是怎么改变两个 bag 相似度计算的？",
+      "canonical_question": "Zhou 2009 的图核思路如何改变 bag-level similarity 的含义？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "miGraph",
+        "bag similarity",
+        "graph kernel"
+      ],
+      "target_papers": [
+        "p01"
+      ],
+      "expected_answer_points": [
+        "bag-level similarity 不再只是实例特征的平均或最大响应，而要考虑同一 bag 内实例之间的接近、团块或边结构。",
+        "两个 bag 是否相似取决于它们内部实例关系模式是否相似。",
+        "这种设计用于弥补 i.i.d. 假设不能表达结构信息的问题。"
+      ],
+      "evidence": [
+        {
+          "source": "zhou2009.pdf.pdf",
+          "page": 3,
+          "chunk_id": 169,
+          "must_include_terms": [
+            "similar",
+            "scatter",
+            "abstraction"
+          ]
+        },
+        {
+          "source": "zhou2009.pdf.pdf",
+          "page": 2,
+          "chunk_id": 166,
+          "must_include_terms": [
+            "graph kernel",
+            "clique"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要只讨论分类器，不讨论相似度或 graph kernel。"
+      ]
+    },
+    {
+      "id": "gmil-v1-004",
+      "type": "single_paper",
+      "category": "method_summary",
+      "difficulty": "medium",
+      "question": "那个 counting instances 的方法解决了什么问题？cardinality 是啥意思？",
+      "canonical_question": "Hajimirsadeghi 2015 的 cardinality potential kernel 主要解决什么问题？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "counting instances",
+        "cardinality",
+        "cardinality potential"
+      ],
+      "target_papers": [
+        "p02"
+      ],
+      "expected_answer_points": [
+        "它关注很多视觉识别任务中的“实例数量”线索，例如某类局部事件或对象出现多少次。",
+        "传统 MIL 的至少一个正实例假设太弱，难以表达复杂数量关系。",
+        "cardinality potential 用于在 MIL 框架中编码潜在实例标签之间的数量关系。",
+        "方法可以处理 hard 或 soft cardinality 约束，并用于活动识别、事件检测、视频摘要等任务。"
+      ],
+      "evidence": [
+        {
+          "source": "Hajimirsadeghi 等 - 2015 - Visual recognition by counting instances A multi-instance cardinality potential kernel.pdf",
+          "page": 1,
+          "chunk_id": 787,
+          "must_include_terms": [
+            "counting instances",
+            "cardinality"
+          ]
+        },
+        {
+          "source": "Hajimirsadeghi 等 - 2015 - Visual recognition by counting instances A multi-instance cardinality potential kernel.pdf",
+          "page": 1,
+          "chunk_id": 788,
+          "must_include_terms": [
+            "hard",
+            "soft",
+            "cardinality"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要把该方法描述成普通 attention MIL。"
+      ]
+    },
+    {
+      "id": "gmil-v1-005",
+      "type": "single_paper",
+      "category": "concept_explanation",
+      "difficulty": "medium",
+      "question": "为什么“数正例个数”也算是在做 MIL 里的关系建模？",
+      "canonical_question": "为什么“counting instances”可以被看作一种 MIL 中的关系建模？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "counting",
+        "positive instances",
+        "cardinality relation"
+      ],
+      "target_papers": [
+        "p02"
+      ],
+      "expected_answer_points": [
+        "MIL 的 bag 标签通常只提供弱监督，实例标签不可见。",
+        "如果任务标签取决于正实例数量或实例组合，仅判断是否存在正实例是不够的。",
+        "cardinality relation 把多个实例的潜在标签联系起来，表达“多少个实例满足某类条件”这样的全局约束。",
+        "因此它建模的是实例集合层面的数量关系，而不是孤立实例得分。"
+      ],
+      "evidence": [
+        {
+          "source": "Hajimirsadeghi 等 - 2015 - Visual recognition by counting instances A multi-instance cardinality potential kernel.pdf",
+          "page": 1,
+          "chunk_id": 791,
+          "must_include_terms": [
+            "counting relations",
+            "multiple instance learning"
+          ]
+        },
+        {
+          "source": "Hajimirsadeghi 等 - 2015 - Visual recognition by counting instances A multi-instance cardinality potential kernel.pdf",
+          "page": 3,
+          "chunk_id": 799,
+          "must_include_terms": [
+            "weak assumption",
+            "number of positive instances"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要把 cardinality 简化成普通类别频率统计。"
+      ]
+    },
+    {
+      "id": "gmil-v1-006",
+      "type": "single_paper",
+      "category": "application_reasoning",
+      "difficulty": "easy",
+      "question": "counting instance 这类方法为什么适合动作识别或视频事件检测？",
+      "canonical_question": "Hajimirsadeghi 2015 为什么适合视觉任务，例如 human activity recognition 或 video event detection？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "counting instance",
+        "human activity",
+        "video event detection"
+      ],
+      "target_papers": [
+        "p02"
+      ],
+      "expected_answer_points": [
+        "视觉任务中一个 bag 往往包含多个局部区域、人物、帧或片段。",
+        "任务标签可能依赖多个相关实例共同出现，而不是单个实例单独触发。",
+        "视频和活动场景中存在时间杂波、局部动作和多参与者数量关系。",
+        "cardinality potential 可以把这些数量和组合线索作为弱监督下的结构约束。"
+      ],
+      "evidence": [
+        {
+          "source": "Hajimirsadeghi 等 - 2015 - Visual recognition by counting instances A multi-instance cardinality potential kernel.pdf",
+          "page": 1,
+          "chunk_id": 788,
+          "must_include_terms": [
+            "human activity recognition",
+            "video event detection"
+          ]
+        },
+        {
+          "source": "Hajimirsadeghi 等 - 2015 - Visual recognition by counting instances A multi-instance cardinality potential kernel.pdf",
+          "page": 1,
+          "chunk_id": 790,
+          "must_include_terms": [
+            "internet video",
+            "temporal clutter"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要把答案写成泛泛的“视觉任务数据量大”。"
+      ]
+    },
+    {
+      "id": "gmil-v1-007",
+      "type": "single_paper",
+      "category": "method_summary",
+      "difficulty": "medium",
+      "question": "GNN-MIL 的流程能讲一下吗？它怎么把一个 bag 变成图？",
+      "canonical_question": "Tu 2019 的 GNN-MIL 方法主流程是什么？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "GNN-MIL",
+        "bag graph",
+        "graph neural network"
+      ],
+      "target_papers": [
+        "p03"
+      ],
+      "expected_answer_points": [
+        "把 MIL 中的每个 bag 转换为图，实例作为节点。",
+        "设计从 bag 到无向图的转换策略，以表达实例间关系。",
+        "用 GNN 学习节点或图表示。",
+        "通过 graph aggregation 得到 bag-level 表示，再进行分类。",
+        "该方法是端到端的 GNN-based MIL。"
+      ],
+      "evidence": [
+        {
+          "source": "Tu 等 - 2019 - Multiple instance learning with graph neural netwo.pdf",
+          "page": 1,
+          "chunk_id": 1,
+          "must_include_terms": [
+            "graph neural network",
+            "MIL"
+          ]
+        },
+        {
+          "source": "Tu 等 - 2019 - Multiple instance learning with graph neural netwo.pdf",
+          "page": 1,
+          "chunk_id": 6,
+          "must_include_terms": [
+            "bag",
+            "undirected graph",
+            "GNN"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要把它说成只做 graph kernel，不使用神经网络表示学习。"
+      ]
+    },
+    {
+      "id": "gmil-v1-008",
+      "type": "single_paper",
+      "category": "workflow",
+      "difficulty": "hard",
+      "question": "GNN-MIL 里 DiffPool 和 attention 聚合分别干嘛？",
+      "canonical_question": "Tu 2019 中 differentiable pooling 和 attention-based aggregation 分别起什么作用？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "DiffPool",
+        "differentiable pooling",
+        "attention aggregation"
+      ],
+      "target_papers": [
+        "p03"
+      ],
+      "expected_answer_points": [
+        "两者都是把节点级表示汇聚成 bag-level 或 graph-level 表示的策略。",
+        "differentiable pooling 学习节点到簇的 assignment，并把图压缩到更小的表示。",
+        "attention-based aggregation 通过权重强调对 bag 分类更关键的实例或节点。",
+        "回答应说明它们位于 GNN 更新之后的 aggregation 阶段。"
+      ],
+      "evidence": [
+        {
+          "source": "Tu 等 - 2019 - Multiple instance learning with graph neural netwo.pdf",
+          "page": 3,
+          "chunk_id": 14,
+          "must_include_terms": [
+            "Differentiable pooling",
+            "assignment matrix"
+          ]
+        },
+        {
+          "source": "Tu 等 - 2019 - Multiple instance learning with graph neural netwo.pdf",
+          "page": 7,
+          "chunk_id": 35,
+          "must_include_terms": [
+            "prediction",
+            "deep supervision"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要把 pooling 解释成 PDF 切块或数据预处理。"
+      ]
+    },
+    {
+      "id": "gmil-v1-009",
+      "type": "single_paper",
+      "category": "method_comparison",
+      "difficulty": "medium",
+      "question": "从 miGraph 到 GNN-MIL，图上的 MIL 方法主要变在哪里？",
+      "canonical_question": "Tu 2019 相比 Zhou 2009 这类 graph-kernel MIL，方法范式发生了什么变化？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "miGraph",
+        "GNN-MIL",
+        "graph kernel",
+        "GNN"
+      ],
+      "target_papers": [
+        "p01",
+        "p03"
+      ],
+      "expected_answer_points": [
+        "Zhou 2009 主要通过设计 graph kernel 来度量 bag 间相似度，再服务于 kernel classifier。",
+        "Tu 2019 把 bag 转成图后用 GNN 端到端学习表示。",
+        "范式从手工设计核函数转向可学习的节点更新和图聚合。",
+        "两者共同关注 non-i.i.d. 实例关系。"
+      ],
+      "evidence": [
+        {
+          "source": "zhou2009.pdf.pdf",
+          "page": 2,
+          "chunk_id": 165,
+          "must_include_terms": [
+            "MIGraph",
+            "miGraph"
+          ]
+        },
+        {
+          "source": "Tu 等 - 2019 - Multiple instance learning with graph neural netwo.pdf",
+          "page": 1,
+          "chunk_id": 6,
+          "must_include_terms": [
+            "GNN",
+            "bag",
+            "graph"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要写成 Tu 2019 完全否定 graph construction；它仍然需要把 bag 构造成图。"
+      ]
+    },
+    {
+      "id": "gmil-v1-010",
+      "type": "single_paper",
+      "category": "application_reasoning",
+      "difficulty": "medium",
+      "question": "GAMIL 为什么能拿来做结直肠癌分期？它比普通 WSI-MIL 多考虑了什么？",
+      "canonical_question": "Raju 2020 的 Graph Attention MIL 为什么用于 colorectal cancer staging？它想解决传统 WSI MIL 的什么不足？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "GAMIL",
+        "Graph Attention MIL",
+        "colorectal cancer staging",
+        "WSI-MIL"
+      ],
+      "target_papers": [
+        "p04"
+      ],
+      "expected_answer_points": [
+        "任务是基于 WSI 做结直肠癌 TNM/肿瘤分期。",
+        "人工标注 discriminative patches 劳动密集且不适合大规模 WSI。",
+        "只选择关键 patch 的方法难以考虑 biopsy sample 中 tissue types 的结构关系。",
+        "Graph Attention MIL 用图结构和注意力机制建模局部组织结构及其对分期的贡献。"
+      ],
+      "evidence": [
+        {
+          "source": "Raju 等 - 2020 - Graph Attention Multi-instance Learning for Accurate Colorectal Cancer Staging.pdf",
+          "page": 1,
+          "chunk_id": 1254,
+          "must_include_terms": [
+            "Colorectal Cancer Staging"
+          ]
+        },
+        {
+          "source": "Raju 等 - 2020 - Graph Attention Multi-instance Learning for Accurate Colorectal Cancer Staging.pdf",
+          "page": 1,
+          "chunk_id": 1255,
+          "must_include_terms": [
+            "manual",
+            "patch",
+            "tissue types"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要只说“使用 attention 提升准确率”，必须说明 WSI 分期和组织结构。"
+      ]
+    },
+    {
+      "id": "gmil-v1-011",
+      "type": "single_paper",
+      "category": "workflow",
+      "difficulty": "hard",
+      "question": "GAMIL 里面一个 WSI 怎么会变成多个图、多个 instance？",
+      "canonical_question": "Raju 2020 的方法怎样把 WSI、多个图和 MIL bag 联系起来？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "GAMIL",
+        "WSI",
+        "multiple graphs",
+        "instances in a bag"
+      ],
+      "target_papers": [
+        "p04"
+      ],
+      "expected_answer_points": [
+        "WSI 被分解为 patch 或局部区域，再根据聚类或组织结构形成多个图。",
+        "每个图包含来自不同 cluster label 的特征，多个图被当作一个 bag 中的多个实例。",
+        "使用 GraphSAGE 或 graph attention 形式学习图表示。",
+        "最终通过 MIL 聚合来预测肿瘤分期。"
+      ],
+      "evidence": [
+        {
+          "source": "Raju 等 - 2020 - Graph Attention Multi-instance Learning for Accurate Colorectal Cancer Staging.pdf",
+          "page": 6,
+          "chunk_id": 1272,
+          "must_include_terms": [
+            "multiple graphs",
+            "GraphSAGE"
+          ]
+        },
+        {
+          "source": "Raju 等 - 2020 - Graph Attention Multi-instance Learning for Accurate Colorectal Cancer Staging.pdf",
+          "page": 9,
+          "chunk_id": 1283,
+          "must_include_terms": [
+            "multiple graphs",
+            "instances in a bag"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要把多个 WSI 误说成一个 bag；此题关注一个 WSI 内的多个图实例。"
+      ]
+    },
+    {
+      "id": "gmil-v1-012",
+      "type": "single_paper",
+      "category": "critical_reading",
+      "difficulty": "medium",
+      "question": "图注意力在 GAMIL 里能帮病理解释什么？",
+      "canonical_question": "Raju 2020 的 graph attention 对病理解释有什么潜在价值？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "GAMIL",
+        "graph attention",
+        "pathology interpretation"
+      ],
+      "target_papers": [
+        "p04"
+      ],
+      "expected_answer_points": [
+        "注意力可以突出对分期判断贡献更大的图、patch 或组织结构区域。",
+        "图结构保留 tissue types 之间的关系，使判断不只依赖单个 patch。",
+        "这种设计更接近病理诊断中利用组织空间排列和局部结构的方式。",
+        "但回答应避免声称它直接产生临床可验证因果解释，除非证据片段支持。"
+      ],
+      "evidence": [
+        {
+          "source": "Raju 等 - 2020 - Graph Attention Multi-instance Learning for Accurate Colorectal Cancer Staging.pdf",
+          "page": 1,
+          "chunk_id": 1255,
+          "must_include_terms": [
+            "structure of tissue types",
+            "tumor status"
+          ]
+        },
+        {
+          "source": "Raju 等 - 2020 - Graph Attention Multi-instance Learning for Accurate Colorectal Cancer Staging.pdf",
+          "page": 1,
+          "chunk_id": 1256,
+          "must_include_terms": [
+            "Graph Attention",
+            "TNM staging"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要把 attention 权重直接等同于严格因果解释。"
+      ]
+    },
+    {
+      "id": "gmil-v1-013",
+      "type": "single_paper",
+      "category": "method_summary",
+      "difficulty": "medium",
+      "question": "Patch-GCN 为什么说 WSI 像 2D point cloud？",
+      "canonical_question": "Chen 2021 为什么说 Whole Slide Images are 2D Point Clouds？Patch-GCN 的核心想法是什么？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "Patch-GCN",
+        "WSI",
+        "2D point cloud"
+      ],
+      "target_papers": [
+        "p05"
+      ],
+      "expected_answer_points": [
+        "WSI 可被切成带空间坐标的 patch 集合，patch 像二维点云中的点。",
+        "Patch-GCN 依据 patch 的空间位置构图，建模 patch 之间的上下文关系。",
+        "节点特征来自 patch-level histology feature，边反映邻近或空间关系。",
+        "目标是做 context-aware survival prediction，而不是只做普通 WSI 分类。"
+      ],
+      "evidence": [
+        {
+          "source": "Chen 等 - 2021 - Whole Slide Images are 2D Point Clouds Context-Aware Survival Prediction Using Patch-Based Graph Co.pdf",
+          "page": 1,
+          "chunk_id": 588,
+          "must_include_terms": [
+            "2D Point Clouds",
+            "survival"
+          ]
+        },
+        {
+          "source": "Chen 等 - 2021 - Whole Slide Images are 2D Point Clouds Context-Aware Survival Prediction Using Patch-Based Graph Co.pdf",
+          "page": 1,
+          "chunk_id": 589,
+          "must_include_terms": [
+            "Patch-GCN",
+            "context-aware"
+          ]
+        },
+        {
+          "source": "Chen 等 - 2021 - Whole Slide Images are 2D Point Clouds Context-Aware Survival Prediction Using Patch-Based Graph Co.pdf",
+          "page": 4,
+          "chunk_id": 599,
+          "must_include_terms": [
+            "coordinates",
+            "adjacency matrix"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要把 2D point clouds 理解为三维点云或激光雷达数据。"
+      ]
+    },
+    {
+      "id": "gmil-v1-014",
+      "type": "single_paper",
+      "category": "workflow",
+      "difficulty": "hard",
+      "question": "PatchGCN 从切 patch 到预测生存风险大概怎么跑？",
+      "canonical_question": "请按流程说明 Patch-GCN 如何从 WSI 得到 survival prediction。",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "PatchGCN",
+        "Patch-GCN",
+        "survival prediction",
+        "patch"
+      ],
+      "target_papers": [
+        "p05"
+      ],
+      "expected_answer_points": [
+        "将 WSI 分成 non-overlapping patches。",
+        "用 CNN 或特征提取器得到每个 patch 的特征向量。",
+        "保留 patch 的空间坐标并据此构造邻接矩阵。",
+        "用图卷积在 patch 图上聚合上下文信息。",
+        "将图级或患者级表示用于生存风险/生存结局预测。"
+      ],
+      "evidence": [
+        {
+          "source": "Chen 等 - 2021 - Whole Slide Images are 2D Point Clouds Context-Aware Survival Prediction Using Patch-Based Graph Co.pdf",
+          "page": 2,
+          "chunk_id": 591,
+          "must_include_terms": [
+            "framework",
+            "survival outcome",
+            "ResNet-50"
+          ]
+        },
+        {
+          "source": "Chen 等 - 2021 - Whole Slide Images are 2D Point Clouds Context-Aware Survival Prediction Using Patch-Based Graph Co.pdf",
+          "page": 4,
+          "chunk_id": 598,
+          "must_include_terms": [
+            "WSIs",
+            "patient"
+          ]
+        },
+        {
+          "source": "Chen 等 - 2021 - Whole Slide Images are 2D Point Clouds Context-Aware Survival Prediction Using Patch-Based Graph Co.pdf",
+          "page": 4,
+          "chunk_id": 599,
+          "must_include_terms": [
+            "k-NN",
+            "adjacency"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要只输出模型名称；必须包含输入、构图、图卷积、输出。"
+      ]
+    },
+    {
+      "id": "gmil-v1-015",
+      "type": "single_paper",
+      "category": "critical_reading",
+      "difficulty": "medium",
+      "question": "普通 MIL 做 WSI 生存预测为什么不够 context-aware？",
+      "canonical_question": "Chen 2021 认为非上下文的 MIL 对 WSI 生存预测有什么不足？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "MIL",
+        "WSI",
+        "context-aware",
+        "survival"
+      ],
+      "target_papers": [
+        "p05"
+      ],
+      "expected_answer_points": [
+        "普通 MIL 聚合 patch 时可能忽略细胞身份和组织类型之间的相互作用。",
+        "这些 morphological feature interactions 对 patient survival 可能有预后价值。",
+        "Patch-GCN 用空间解析的图结构弥补这种上下文缺失。",
+        "回答应强调 context-aware，而不是只强调模型更深或参数更多。"
+      ],
+      "evidence": [
+        {
+          "source": "Chen 等 - 2021 - Whole Slide Images are 2D Point Clouds Context-Aware Survival Prediction Using Patch-Based Graph Co.pdf",
+          "page": 1,
+          "chunk_id": 589,
+          "must_include_terms": [
+            "not context-aware",
+            "morphological",
+            "survival"
+          ]
+        },
+        {
+          "source": "Chen 等 - 2021 - Whole Slide Images are 2D Point Clouds Context-Aware Survival Prediction Using Patch-Based Graph Co.pdf",
+          "page": 3,
+          "chunk_id": 593,
+          "must_include_terms": [
+            "context-aware",
+            "spatially"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要把问题回答成“普通 MIL 无法处理大图像”这一单点。"
+      ]
+    },
+    {
+      "id": "gmil-v1-016",
+      "type": "single_paper",
+      "category": "method_summary",
+      "difficulty": "medium",
+      "question": "Bag Graph 这篇到底是在连哪些东西？为什么要用 Bayesian GNN？",
+      "canonical_question": "Pal 2022 的 Bag Graph MIL 主要建模的是什么图？为什么需要 Bayesian GNN？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "Bag Graph",
+        "Bayesian GNN",
+        "bags interaction"
+      ],
+      "target_papers": [
+        "p06"
+      ],
+      "expected_answer_points": [
+        "该方法不是只在一个 bag 内部构图，而是考虑 bags 之间的交互关系图。",
+        "很多任务中 bag 间依赖图可能不存在、噪声大或由启发式构造而来。",
+        "Bayesian GNN 用于在不确定图结构下进行端到端学习。",
+        "它同时学习 bag-level 表示和图依赖关系的不确定性。"
+      ],
+      "evidence": [
+        {
+          "source": "Pal 等 - 2022 - Bag Graph Multiple Instance Learning Using Bayesi.pdf",
+          "page": 1,
+          "chunk_id": 1127,
+          "must_include_terms": [
+            "Bag Graph",
+            "Bayesian"
+          ]
+        },
+        {
+          "source": "Pal 等 - 2022 - Bag Graph Multiple Instance Learning Using Bayesi.pdf",
+          "page": 1,
+          "chunk_id": 1128,
+          "must_include_terms": [
+            "interactions between bags",
+            "Graph Neural Networks"
+          ]
+        },
+        {
+          "source": "Pal 等 - 2022 - Bag Graph Multiple Instance Learning Using Bayesi.pdf",
+          "page": 1,
+          "chunk_id": 1132,
+          "must_include_terms": [
+            "no graph available",
+            "noisy"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要误写成只对 patch 节点做 Bayesian 推断。"
+      ]
+    },
+    {
+      "id": "gmil-v1-017",
+      "type": "single_paper",
+      "category": "concept_explanation",
+      "difficulty": "hard",
+      "question": "Bag Graph 里说图有不确定性，具体不确定在哪？",
+      "canonical_question": "Pal 2022 中 uncertainty 的来源是什么？这种不确定性为什么会影响 MIL？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "Bag Graph",
+        "uncertainty",
+        "observed graph"
+      ],
+      "target_papers": [
+        "p06"
+      ],
+      "expected_answer_points": [
+        "不确定性主要来自 observed graph 可能由噪声数据、启发式或不完美建模假设构造。",
+        "这种图可能不能代表真实的 bag 依赖结构。",
+        "如果依赖图错误，GNN 消息传播和 bag 表示学习会受到影响。",
+        "Bayesian 框架可以把图结构不确定性纳入学习，而不是固定相信一个确定图。"
+      ],
+      "evidence": [
+        {
+          "source": "Pal 等 - 2022 - Bag Graph Multiple Instance Learning Using Bayesi.pdf",
+          "page": 3,
+          "chunk_id": 1143,
+          "must_include_terms": [
+            "uncertainty",
+            "observed graph",
+            "noisy"
+          ]
+        },
+        {
+          "source": "Pal 等 - 2022 - Bag Graph Multiple Instance Learning Using Bayesi.pdf",
+          "page": 1,
+          "chunk_id": 1132,
+          "must_include_terms": [
+            "dependencies",
+            "no graph available"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要把 uncertainty 仅解释为模型输出概率低。"
+      ]
+    },
+    {
+      "id": "gmil-v1-018",
+      "type": "cross_paper",
+      "category": "method_comparison",
+      "difficulty": "hard",
+      "question": "Bag Graph 和 GNN-MIL 的节点到底是不是一回事？",
+      "canonical_question": "Pal 2022 的 Bag Graph 与 Tu 2019 的 GNN-MIL 在“图的节点是什么”这个问题上有什么关键差异？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "Bag Graph",
+        "GNN-MIL",
+        "node",
+        "bag-level graph"
+      ],
+      "target_papers": [
+        "p03",
+        "p06"
+      ],
+      "expected_answer_points": [
+        "Tu 2019 通常把一个 bag 内的 instances 作为图节点，学习该 bag 的图表示。",
+        "Pal 2022 建模 bags 之间的图，节点更接近 bag-level entity。",
+        "两者都使用 GNN，但图层级不同：instance graph vs bag graph。",
+        "这个差异会改变消息传播的语义和最终表示学习对象。"
+      ],
+      "evidence": [
+        {
+          "source": "Tu 等 - 2019 - Multiple instance learning with graph neural netwo.pdf",
+          "page": 1,
+          "chunk_id": 6,
+          "must_include_terms": [
+            "each bag",
+            "undirected graph"
+          ]
+        },
+        {
+          "source": "Pal 等 - 2022 - Bag Graph Multiple Instance Learning Using Bayesi.pdf",
+          "page": 1,
+          "chunk_id": 1128,
+          "must_include_terms": [
+            "interactions between bags",
+            "graph"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要仅比较年份或实验数据集。"
+      ]
+    },
+    {
+      "id": "gmil-v1-019",
+      "type": "single_paper",
+      "category": "method_summary",
+      "difficulty": "medium",
+      "question": "NAGCN 为什么要对齐节点？WSI 里节点不对齐会出什么问题？",
+      "canonical_question": "Guan 2022 的 NAGCN 为什么要做 node alignment？它针对 WSI 表示学习中的什么问题？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "NAGCN",
+        "node alignment",
+        "WSI"
+      ],
+      "target_papers": [
+        "p07"
+      ],
+      "expected_answer_points": [
+        "不同 WSI 的 patch 节点通常无序且没有天然一一对应关系。",
+        "直接做 non-ordered node pooling 会丢失 patch 分布和异质模式等结构上下文信息。",
+        "NAGCN 通过节点对齐让不同 WSI 的图有可比较的节点结构。",
+        "这样更容易得到保留局部结构和全局分布的 WSI-level representation。"
+      ],
+      "evidence": [
+        {
+          "source": "Guan 等 - 2022 - Node-aligned graph convolutional network for whole-slide image representation and classification.pdf",
+          "page": 1,
+          "chunk_id": 722,
+          "must_include_terms": [
+            "Node-aligned",
+            "Whole-slide"
+          ]
+        },
+        {
+          "source": "Guan 等 - 2022 - Node-aligned graph convolutional network for whole-slide image representation and classification.pdf",
+          "page": 1,
+          "chunk_id": 723,
+          "must_include_terms": [
+            "non-ordered",
+            "structural",
+            "contextual"
+          ]
+        },
+        {
+          "source": "Guan 等 - 2022 - Node-aligned graph convolutional network for whole-slide image representation and classification.pdf",
+          "page": 2,
+          "chunk_id": 730,
+          "must_include_terms": [
+            "global-to-local clustering",
+            "NAGCN"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要把 node alignment 解释成图像配准或像素级配准。"
+      ]
+    },
+    {
+      "id": "gmil-v1-020",
+      "type": "single_paper",
+      "category": "workflow",
+      "difficulty": "hard",
+      "question": "NAGCN 的 global-to-local 聚类是为了降维还是为了构图？",
+      "canonical_question": "请说明 NAGCN 的 hierarchical global-to-local clustering 在整个方法中的作用。",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "NAGCN",
+        "global-to-local clustering",
+        "graph nodes"
+      ],
+      "target_papers": [
+        "p07"
+      ],
+      "expected_answer_points": [
+        "先通过全局到局部的层级聚类组织 WSI patch 或实例。",
+        "在子 bag 或聚类内选择典型实例作为图节点。",
+        "该策略使不同 WSI 的节点具备可对齐性。",
+        "随后可以用 graph convolution 得到结构化的 WSI 表示。"
+      ],
+      "evidence": [
+        {
+          "source": "Guan 等 - 2022 - Node-aligned graph convolutional network for whole-slide image representation and classification.pdf",
+          "page": 2,
+          "chunk_id": 730,
+          "must_include_terms": [
+            "hierarchical",
+            "global-to-local",
+            "clustering"
+          ]
+        },
+        {
+          "source": "Guan 等 - 2022 - Node-aligned graph convolutional network for whole-slide image representation and classification.pdf",
+          "page": 2,
+          "chunk_id": 731,
+          "must_include_terms": [
+            "sampling",
+            "graph nodes"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要只说“聚类降维”，必须说明节点对齐和图表示。"
+      ]
+    },
+    {
+      "id": "gmil-v1-021",
+      "type": "single_paper",
+      "category": "critical_reading",
+      "difficulty": "medium",
+      "question": "NAGCN 相比普通 attention pooling，真正多了什么？",
+      "canonical_question": "NAGCN 与普通 attention pooling 型 WSI-MIL 相比，核心优势应如何表述？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "NAGCN",
+        "attention pooling",
+        "node-aligned"
+      ],
+      "target_papers": [
+        "p07"
+      ],
+      "expected_answer_points": [
+        "普通 pooling 容易把 WSI 简化为无序实例集合，弱化空间/结构分布。",
+        "NAGCN 强调节点对齐和图卷积，以保留局部结构、全局分布和异质模式。",
+        "它并非只是替换聚合函数，而是改变 WSI 表示的结构组织方式。",
+        "回答应避免泛泛说成“准确率更高”。"
+      ],
+      "evidence": [
+        {
+          "source": "Guan 等 - 2022 - Node-aligned graph convolutional network for whole-slide image representation and classification.pdf",
+          "page": 1,
+          "chunk_id": 723,
+          "must_include_terms": [
+            "Direct non-ordered pooling",
+            "lose"
+          ]
+        },
+        {
+          "source": "Guan 等 - 2022 - Node-aligned graph convolutional network for whole-slide image representation and classification.pdf",
+          "page": 1,
+          "chunk_id": 724,
+          "must_include_terms": [
+            "graph convolution",
+            "WSI-level representation"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要只讲 attention 权重，不讲 node alignment。"
+      ]
+    },
+    {
+      "id": "gmil-v1-022",
+      "type": "single_paper",
+      "category": "application_reasoning",
+      "difficulty": "medium",
+      "question": "SGMF/结构感知层级图为什么适合做病理 pT 分期？",
+      "canonical_question": "Shi 2023 的结构感知层级图 MIL 为什么适合 histopathological image 的 pT staging？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "SGMF",
+        "structure-aware hierarchical graph",
+        "pT staging"
+      ],
+      "target_papers": [
+        "p08"
+      ],
+      "expected_answer_points": [
+        "pT staging 需要识别肿瘤与正常组织之间的关键边界和上下文关系。",
+        "单一放大倍率 patch 独立特征不足以逐步表达多尺度上下文。",
+        "结构感知和层级图能把不同区域或不同放大倍率之间的关系纳入表示。",
+        "该方法针对弱监督病理场景，减少对像素级标注的依赖。"
+      ],
+      "evidence": [
+        {
+          "source": "Shi 等 - 2023 - A Structure-Aware Hierarchical Graph-Based Multiple Instance Learning Framework for pT Staging in Hi.pdf",
+          "page": 1,
+          "chunk_id": 1293,
+          "must_include_terms": [
+            "Structure-Aware",
+            "pT Staging"
+          ]
+        },
+        {
+          "source": "Shi 等 - 2023 - A Structure-Aware Hierarchical Graph-Based Multiple Instance Learning Framework for pT Staging in Hi.pdf",
+          "page": 1,
+          "chunk_id": 1294,
+          "must_include_terms": [
+            "multiple magnification",
+            "contextual information"
+          ]
+        },
+        {
+          "source": "Shi 等 - 2023 - A Structure-Aware Hierarchical Graph-Based Multiple Instance Learning Framework for pT Staging in Hi.pdf",
+          "page": 2,
+          "chunk_id": 1302,
+          "must_include_terms": [
+            "junctions",
+            "tumors",
+            "normal tissues"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要把 pT staging 简化成普通癌症分类。"
+      ]
+    },
+    {
+      "id": "gmil-v1-023",
+      "type": "single_paper",
+      "category": "workflow",
+      "difficulty": "hard",
+      "question": "SGMF 这种层级图 MIL 的输入和输出大概是什么？中间图怎么用？",
+      "canonical_question": "请从输入、结构建模和输出三个层面概括 Shi 2023 的层级图 MIL 框架。",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "SGMF",
+        "hierarchical graph MIL",
+        "input output"
+      ],
+      "target_papers": [
+        "p08"
+      ],
+      "expected_answer_points": [
+        "输入是 histopathological image 中的 patch/区域，且涉及多放大倍率信息。",
+        "框架需要表达局部组织区域与更高层级上下文之间的关系。",
+        "图结构用于建模区域之间的结构依赖和层级上下文。",
+        "输出服务于 pT staging 等病理分期判断。",
+        "回答应把“层级”和“结构感知”都讲清楚。"
+      ],
+      "evidence": [
+        {
+          "source": "Shi 等 - 2023 - A Structure-Aware Hierarchical Graph-Based Multiple Instance Learning Framework for pT Staging in Hi.pdf",
+          "page": 1,
+          "chunk_id": 1294,
+          "must_include_terms": [
+            "patches",
+            "single magnification",
+            "contextual"
+          ]
+        },
+        {
+          "source": "Shi 等 - 2023 - A Structure-Aware Hierarchical Graph-Based Multiple Instance Learning Framework for pT Staging in Hi.pdf",
+          "page": 4,
+          "chunk_id": 1319,
+          "must_include_terms": [
+            "pT staging",
+            "histopathological image"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要只列模型名或缩写。"
+      ]
+    },
+    {
+      "id": "gmil-v1-024",
+      "type": "single_paper",
+      "category": "critical_reading",
+      "difficulty": "medium",
+      "question": "pT staging 里为什么肿瘤和正常组织交界处这么关键？",
+      "canonical_question": "Shi 2023 中“肿瘤与正常组织 junctions”为什么是 pT staging 的关键信息？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "pT staging",
+        "junction",
+        "tumor normal tissue"
+      ],
+      "target_papers": [
+        "p08"
+      ],
+      "expected_answer_points": [
+        "pT staging 与肿瘤侵犯范围和组织边界关系有关。",
+        "肿瘤与正常组织交界区域能反映局部侵袭和组织结构变化。",
+        "如果只独立看 patch，可能丢失这种边界和上下文关系。",
+        "层级图建模的价值在于捕捉这些跨区域结构线索。"
+      ],
+      "evidence": [
+        {
+          "source": "Shi 等 - 2023 - A Structure-Aware Hierarchical Graph-Based Multiple Instance Learning Framework for pT Staging in Hi.pdf",
+          "page": 2,
+          "chunk_id": 1302,
+          "must_include_terms": [
+            "junctions",
+            "tumors",
+            "normal tissues"
+          ]
+        },
+        {
+          "source": "Shi 等 - 2023 - A Structure-Aware Hierarchical Graph-Based Multiple Instance Learning Framework for pT Staging in Hi.pdf",
+          "page": 1,
+          "chunk_id": 1294,
+          "must_include_terms": [
+            "contextual information",
+            "multiple magnifications"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要声称模型需要像素级 junction 标注，除非证据支持。"
+      ]
+    },
+    {
+      "id": "gmil-v1-025",
+      "type": "single_paper",
+      "category": "method_summary",
+      "difficulty": "medium",
+      "question": "RGMIL 为什么要用强化学习来调 GNN？",
+      "canonical_question": "Zhao 2024 的 RGMIL 为什么引入 multi-agent deep reinforcement learning？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "RGMIL",
+        "reinforcement learning",
+        "GNN"
+      ],
+      "target_papers": [
+        "p09"
+      ],
+      "expected_answer_points": [
+        "MIL 中 bag graph 的边密度、图结构和 GNN 层数等因素会影响表示学习。",
+        "手工调节这些因素既繁琐又不够灵活。",
+        "RGMIL 用 MADRL 同步控制影响 bag graph 和 GNN 的因素。",
+        "目标是在结构选择和架构选择之间建立自适应关系。"
+      ],
+      "evidence": [
+        {
+          "source": "Zhao 等 - 2024 - Reinforced GNNs for Multiple Instance Learning.pdf",
+          "page": 1,
+          "chunk_id": 52,
+          "must_include_terms": [
+            "RGMIL",
+            "multiagent",
+            "reinforcement"
+          ]
+        },
+        {
+          "source": "Zhao 等 - 2024 - Reinforced GNNs for Multiple Instance Learning.pdf",
+          "page": 2,
+          "chunk_id": 61,
+          "must_include_terms": [
+            "manually",
+            "tedious",
+            "inflexible"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要把强化学习说成只用于数据增强。"
+      ]
+    },
+    {
+      "id": "gmil-v1-026",
+      "type": "single_paper",
+      "category": "workflow",
+      "difficulty": "hard",
+      "question": "RGMIL 两个 agent 分别在调什么？边阈值和层数为什么相关？",
+      "canonical_question": "RGMIL 中两个 agent 分别控制什么？为什么这两个控制量要一起考虑？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "RGMIL",
+        "agent",
+        "edge threshold",
+        "GNN layers"
+      ],
+      "target_papers": [
+        "p09"
+      ],
+      "expected_answer_points": [
+        "一个 agent 调整边过滤阈值或边密度，从而改变 bag graph 结构。",
+        "另一个 agent 调整 GNN 层数，决定消息聚合范围或深度。",
+        "边密度会影响可传播的邻居范围，GNN 层数会影响聚合深度。",
+        "两者一起决定结构信息如何在图上流动，因此需要联合自适应控制。"
+      ],
+      "evidence": [
+        {
+          "source": "Zhao 等 - 2024 - Reinforced GNNs for Multiple Instance Learning.pdf",
+          "page": 1,
+          "chunk_id": 52,
+          "must_include_terms": [
+            "bag graphs",
+            "GNNs",
+            "synchronous control"
+          ]
+        },
+        {
+          "source": "Zhao 等 - 2024 - Reinforced GNNs for Multiple Instance Learning.pdf",
+          "page": 2,
+          "chunk_id": 59,
+          "must_include_terms": [
+            "attention-based",
+            "threshold"
+          ]
+        },
+        {
+          "source": "Zhao 等 - 2024 - Reinforced GNNs for Multiple Instance Learning.pdf",
+          "page": 3,
+          "chunk_id": 66,
+          "must_include_terms": [
+            "edge density",
+            "aggregation range"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要只回答“两个 agent 提升准确率”。"
+      ]
+    },
+    {
+      "id": "gmil-v1-027",
+      "type": "single_paper",
+      "category": "critical_reading",
+      "difficulty": "medium",
+      "question": "固定 epsilon 图和固定 GNN 层数有什么坑，RGMIL 想怎么避免？",
+      "canonical_question": "RGMIL 相比固定 epsilon graph 或固定 GNN 层数的 MIL 方法，潜在优势是什么？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "epsilon graph",
+        "GNN layers",
+        "RGMIL"
+      ],
+      "target_papers": [
+        "p09"
+      ],
+      "expected_answer_points": [
+        "不同 bag 或数据集可能需要不同图密度和聚合深度。",
+        "固定阈值和固定层数可能造成欠连接、过连接、欠聚合或过平滑。",
+        "RGMIL 通过强化学习策略自适应调节这些因素。",
+        "优势应表述为结构-架构联合选择，而不是单纯模型复杂度增加。"
+      ],
+      "evidence": [
+        {
+          "source": "Zhao 等 - 2024 - Reinforced GNNs for Multiple Instance Learning.pdf",
+          "page": 2,
+          "chunk_id": 61,
+          "must_include_terms": [
+            "RGMIL",
+            "application"
+          ]
+        },
+        {
+          "source": "Zhao 等 - 2024 - Reinforced GNNs for Multiple Instance Learning.pdf",
+          "page": 3,
+          "chunk_id": 66,
+          "must_include_terms": [
+            "correlations",
+            "edge density",
+            "aggregation range"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要无证据声称 RGMIL 一定在所有任务上最优。"
+      ]
+    },
+    {
+      "id": "gmil-v1-028",
+      "type": "single_paper",
+      "category": "method_summary",
+      "difficulty": "medium",
+      "question": "TAD-Graph 想解决 WSI 图里什么噪声或无关结构问题？",
+      "canonical_question": "Wang 2025 的 TAD-Graph 试图解决 WSI 图分析中的什么问题？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "TAD-Graph",
+        "WSI graph",
+        "irrelevant subgraph"
+      ],
+      "target_papers": [
+        "p10"
+      ],
+      "expected_answer_points": [
+        "传统 WSI 图方法常直接使用整体图进行预测，可能受到无关结构或噪声子图影响。",
+        "TAD-Graph 提出 task-aware disentanglement graph，识别并解耦 informative subgraphs。",
+        "它强调只利用与任务相关的子图增强上下文特征提取。",
+        "目标包括提升 WSI 分析性能和提供更可解释的病理线索。"
+      ],
+      "evidence": [
+        {
+          "source": "Wang 等 - 2025 - TAD-Graph Enhancing Whole Slide Image Analysis via Task-Aware Subgraph Disentanglement.pdf",
+          "page": 1,
+          "chunk_id": 1457,
+          "must_include_terms": [
+            "Task-Aware",
+            "Subgraph Disentanglement"
+          ]
+        },
+        {
+          "source": "Wang 等 - 2025 - TAD-Graph Enhancing Whole Slide Image Analysis via Task-Aware Subgraph Disentanglement.pdf",
+          "page": 1,
+          "chunk_id": 1458,
+          "must_include_terms": [
+            "informative subgraphs",
+            "contextual feature"
+          ]
+        },
+        {
+          "source": "Wang 等 - 2025 - TAD-Graph Enhancing Whole Slide Image Analysis via Task-Aware Subgraph Disentanglement.pdf",
+          "page": 2,
+          "chunk_id": 1465,
+          "must_include_terms": [
+            "traditional graph-based",
+            "entire graph"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要把 TAD-Graph 简化为普通 attention pooling。"
+      ]
+    },
+    {
+      "id": "gmil-v1-029",
+      "type": "single_paper",
+      "category": "workflow",
+      "difficulty": "hard",
+      "question": "TAD-Graph 怎么把任务相关子图挑出来？流程说一下。",
+      "canonical_question": "请概括 TAD-Graph 的任务感知子图解耦流程。",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "TAD-Graph",
+        "task-relevant subgraph",
+        "disentanglement"
+      ],
+      "target_papers": [
+        "p10"
+      ],
+      "expected_answer_points": [
+        "输入是 WSI 的图表示。",
+        "方法向图建模中引入随机性或扰动以辅助区分任务相关与任务无关结构。",
+        "识别并解耦 informative/task-relevant subgraphs。",
+        "只在任务相关子图上进行图级聚合或强化上下文特征。",
+        "输出用于 WSI 任务预测，同时保留可解释子图线索。"
+      ],
+      "evidence": [
+        {
+          "source": "Wang 等 - 2025 - TAD-Graph Enhancing Whole Slide Image Analysis via Task-Aware Subgraph Disentanglement.pdf",
+          "page": 1,
+          "chunk_id": 1458,
+          "must_include_terms": [
+            "stochasticity",
+            "informative subgraphs",
+            "disentangling"
+          ]
+        },
+        {
+          "source": "Wang 等 - 2025 - TAD-Graph Enhancing Whole Slide Image Analysis via Task-Aware Subgraph Disentanglement.pdf",
+          "page": 3,
+          "chunk_id": 1472,
+          "must_include_terms": [
+            "task-aware",
+            "post-hoc"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要遗漏 task-relevant 与 task-irrelevant 的区别。"
+      ]
+    },
+    {
+      "id": "gmil-v1-030",
+      "type": "single_paper",
+      "category": "interpretability",
+      "difficulty": "medium",
+      "question": "TAD-Graph 的解释性来自子图本身吗？和 GNNExplainer 这种事后解释有啥不同？",
+      "canonical_question": "TAD-Graph 的可解释性主要来自哪里？它与事后解释工具有什么区别？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "TAD-Graph",
+        "interpretability",
+        "GNNExplainer",
+        "post-hoc"
+      ],
+      "target_papers": [
+        "p10"
+      ],
+      "expected_answer_points": [
+        "可解释性来自模型内部对任务相关子图的识别和解耦，而不只是训练后再解释。",
+        "论文提到通过 pathological concept-based metrics 分析其提供解释性洞察和潜在 biomarker 发现能力。",
+        "与 post-hoc 工具不同，TAD-Graph 的子图选择参与预测流程。",
+        "回答应保持谨慎，不应夸大为已完成临床因果验证。"
+      ],
+      "evidence": [
+        {
+          "source": "Wang 等 - 2025 - TAD-Graph Enhancing Whole Slide Image Analysis via Task-Aware Subgraph Disentanglement.pdf",
+          "page": 1,
+          "chunk_id": 1459,
+          "must_include_terms": [
+            "pathological concept",
+            "biomarker"
+          ]
+        },
+        {
+          "source": "Wang 等 - 2025 - TAD-Graph Enhancing Whole Slide Image Analysis via Task-Aware Subgraph Disentanglement.pdf",
+          "page": 3,
+          "chunk_id": 1472,
+          "must_include_terms": [
+            "post-hoc",
+            "GNNExplainer"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要把“可解释”说成完全等同于病理医生认可。"
+      ]
+    },
+    {
+      "id": "gmil-v1-031",
+      "type": "cross_paper",
+      "category": "taxonomy",
+      "difficulty": "hard",
+      "question": "从 miGraph、GNN-MIL 到 TAD-Graph，这条技术路线怎么演进的？",
+      "canonical_question": "从方法范式看，Zhou 2009、Tu 2019 和 Wang 2025 分别代表 graph-based MIL 的哪些阶段性变化？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "miGraph",
+        "GNN-MIL",
+        "TAD-Graph",
+        "taxonomy"
+      ],
+      "target_papers": [
+        "p01",
+        "p03",
+        "p10"
+      ],
+      "expected_answer_points": [
+        "Zhou 2009 代表 graph-kernel 阶段，用显式或隐式图结构设计 bag 相似度。",
+        "Tu 2019 代表 GNN-MIL 阶段，把 bag 转为图并用 GNN 端到端学习表示。",
+        "Wang 2025 代表任务感知图学习阶段，不只构图和聚合，还要区分任务相关与无关子图。",
+        "三者共同目标都是突破 i.i.d. 实例假设，利用实例或子图关系提升 bag-level 推理。"
+      ],
+      "evidence": [
+        {
+          "source": "zhou2009.pdf.pdf",
+          "page": 2,
+          "chunk_id": 165,
+          "must_include_terms": [
+            "MIGraph",
+            "miGraph"
+          ]
+        },
+        {
+          "source": "Tu 等 - 2019 - Multiple instance learning with graph neural netwo.pdf",
+          "page": 1,
+          "chunk_id": 6,
+          "must_include_terms": [
+            "GNN",
+            "undirected graph"
+          ]
+        },
+        {
+          "source": "Wang 等 - 2025 - TAD-Graph Enhancing Whole Slide Image Analysis via Task-Aware Subgraph Disentanglement.pdf",
+          "page": 1,
+          "chunk_id": 1458,
+          "must_include_terms": [
+            "Task-Aware",
+            "informative subgraphs"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要把三篇都归为同一种 GNN 方法。"
+      ]
+    },
+    {
+      "id": "gmil-v1-032",
+      "type": "cross_paper",
+      "category": "method_comparison",
+      "difficulty": "hard",
+      "question": "Patch-GCN、NAGCN、TAD-Graph 都在用 WSI 结构信息，它们侧重点分别是什么？",
+      "canonical_question": "比较 Patch-GCN、NAGCN 和 TAD-Graph：它们分别怎样利用 WSI 中的结构信息？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "Patch-GCN",
+        "NAGCN",
+        "TAD-Graph",
+        "WSI structure"
+      ],
+      "target_papers": [
+        "p05",
+        "p07",
+        "p10"
+      ],
+      "expected_answer_points": [
+        "Patch-GCN 利用 patch 坐标把 WSI 建成空间邻接图，强调 context-aware survival prediction。",
+        "NAGCN 通过 global-to-local clustering 和 node alignment 保留 WSI 的局部结构与全局分布。",
+        "TAD-Graph 在已有 WSI 图上进一步解耦任务相关和任务无关子图。",
+        "三者都利用结构信息，但关注点从空间邻接、节点对齐到任务感知子图选择逐步变化。"
+      ],
+      "evidence": [
+        {
+          "source": "Chen 等 - 2021 - Whole Slide Images are 2D Point Clouds Context-Aware Survival Prediction Using Patch-Based Graph Co.pdf",
+          "page": 4,
+          "chunk_id": 599,
+          "must_include_terms": [
+            "coordinates",
+            "adjacency"
+          ]
+        },
+        {
+          "source": "Guan 等 - 2022 - Node-aligned graph convolutional network for whole-slide image representation and classification.pdf",
+          "page": 2,
+          "chunk_id": 730,
+          "must_include_terms": [
+            "global-to-local",
+            "Node-Aligned"
+          ]
+        },
+        {
+          "source": "Wang 等 - 2025 - TAD-Graph Enhancing Whole Slide Image Analysis via Task-Aware Subgraph Disentanglement.pdf",
+          "page": 1,
+          "chunk_id": 1458,
+          "must_include_terms": [
+            "disentangling",
+            "informative subgraphs"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要只按年份排序；必须比较结构信息的使用方式。"
+      ]
+    },
+    {
+      "id": "gmil-v1-033",
+      "type": "cross_paper",
+      "category": "application_reasoning",
+      "difficulty": "medium",
+      "question": "为什么病理 WSI 特别适合用图上的 MIL？举几个代表方法说明。",
+      "canonical_question": "为什么 WSI/病理图像成为 graph-based MIL 的重要应用场景？请结合 Raju 2020、Chen 2021 和 Shi 2023 回答。",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "pathology WSI",
+        "graph MIL",
+        "GAMIL",
+        "Patch-GCN",
+        "SGMF"
+      ],
+      "target_papers": [
+        "p04",
+        "p05",
+        "p08"
+      ],
+      "expected_answer_points": [
+        "WSI 通常只有 slide-level 或 patient-level 弱标签，符合 MIL 设置。",
+        "patch 数量巨大且像素级或 patch 级标注成本高。",
+        "组织类型、细胞身份、肿瘤边界和空间邻近关系对诊断或预后有价值。",
+        "图结构可以表达 patch/区域之间的空间和上下文依赖，从而补足普通 pooling 的不足。"
+      ],
+      "evidence": [
+        {
+          "source": "Raju 等 - 2020 - Graph Attention Multi-instance Learning for Accurate Colorectal Cancer Staging.pdf",
+          "page": 1,
+          "chunk_id": 1255,
+          "must_include_terms": [
+            "manual",
+            "tissue types"
+          ]
+        },
+        {
+          "source": "Chen 等 - 2021 - Whole Slide Images are 2D Point Clouds Context-Aware Survival Prediction Using Patch-Based Graph Co.pdf",
+          "page": 1,
+          "chunk_id": 589,
+          "must_include_terms": [
+            "morphological",
+            "survival"
+          ]
+        },
+        {
+          "source": "Shi 等 - 2023 - A Structure-Aware Hierarchical Graph-Based Multiple Instance Learning Framework for pT Staging in Hi.pdf",
+          "page": 2,
+          "chunk_id": 1302,
+          "must_include_terms": [
+            "junctions",
+            "tumors",
+            "normal tissues"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要只说“医学图像数据多”。"
+      ]
+    },
+    {
+      "id": "gmil-v1-034",
+      "type": "cross_paper",
+      "category": "critical_reading",
+      "difficulty": "hard",
+      "question": "Bayesian Bag Graph、RGMIL、TAD-Graph 都不太相信初始图，它们各自怎么处理？",
+      "canonical_question": "Pal 2022、Zhao 2024 和 Wang 2025 都在处理“图不是固定真理”的问题，但思路有什么不同？",
+      "query_style": "natural_fuzzy",
+      "alias_terms": [
+        "Bayesian Bag Graph",
+        "RGMIL",
+        "TAD-Graph",
+        "initial graph"
+      ],
+      "target_papers": [
+        "p06",
+        "p09",
+        "p10"
+      ],
+      "expected_answer_points": [
+        "Pal 2022 关注 observed graph 可能噪声或缺失，用 Bayesian GNN 建模图结构不确定性。",
+        "Zhao 2024 关注边密度和 GNN 层数等结构-架构因素需要自适应控制，用 MADRL 调节。",
+        "Wang 2025 关注整体 WSI 图中存在任务无关结构，用 task-aware subgraph disentanglement 选择任务相关子图。",
+        "三者都不把初始图当成完全可靠输入，但分别从不确定性、自适应控制、任务相关性三个角度解决。"
+      ],
+      "evidence": [
+        {
+          "source": "Pal 等 - 2022 - Bag Graph Multiple Instance Learning Using Bayesi.pdf",
+          "page": 3,
+          "chunk_id": 1143,
+          "must_include_terms": [
+            "observed graph",
+            "uncertainty"
+          ]
+        },
+        {
+          "source": "Zhao 等 - 2024 - Reinforced GNNs for Multiple Instance Learning.pdf",
+          "page": 3,
+          "chunk_id": 66,
+          "must_include_terms": [
+            "edge density",
+            "aggregation range"
+          ]
+        },
+        {
+          "source": "Wang 等 - 2025 - TAD-Graph Enhancing Whole Slide Image Analysis via Task-Aware Subgraph Disentanglement.pdf",
+          "page": 1,
+          "chunk_id": 1458,
+          "must_include_terms": [
+            "informative subgraphs",
+            "disentangling"
+          ]
+        }
+      ],
+      "negative_checks": [
+        "不要把三者都笼统说成“自动学习图结构”。"
+      ]
+    }
+  ]
+}

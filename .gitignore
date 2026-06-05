@@ -4,5 +4,8 @@
 .uv-cache*/
 __pycache__/
 *.pyc
-data/
+data/*
+!data/eval/
+!data/eval/**
+data/eval/runs/
 vectorstore/faiss_index/
