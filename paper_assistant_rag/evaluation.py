@@ -70,41 +70,33 @@ def run_evaluation(
 
     rows: list[dict[str, Any]] = []
     for index, item in enumerate(items, start=1):
-        query = _item_query(item, query_field)
-        console.print(f"[cyan]({index}/{len(items)})[/cyan] {item['id']}: {query}")
-        retrieval_rows = _retrieve_rows(
-            vectorstore=vectorstore,
-            query=query,
-            k=k,
-            include_references=include_references,
-        )
-        row = {
-            "id": str(item["id"]),
-            "question": query,
-            "canonical_question": str(item.get("canonical_question", "")),
-            "alias_terms": list(item.get("alias_terms", [])),
-            "type": str(item.get("type", "")),
-            "category": str(item.get("category", "")),
-            "difficulty": str(item.get("difficulty", "")),
-            "target_papers": list(item.get("target_papers", [])),
-            "expected_answer_points": list(item.get("expected_answer_points", [])),
-            "evidence": list(item.get("evidence", [])),
-            "negative_checks": list(item.get("negative_checks", [])),
-            "retrieved": retrieval_rows,
-            "retrieval_metrics": _score_retrieval(item, retrieval_rows, paper_sources),
-        }
-
-        if answer_chain is not None:
-            row.update(
-                _answer_item(
-                    chain=answer_chain,
-                    item=item,
-                    query=query,
-                    session_id=f"{session_prefix}-{item['id']}",
-                    memory_db=memory_db,
-                )
+        if _is_multi_turn_item(item):
+            console.print(f"[cyan]({index}/{len(items)})[/cyan] {item['id']}: multi-turn")
+            row = _evaluate_multi_turn_item(
+                item=item,
+                vectorstore=vectorstore,
+                paper_sources=paper_sources,
+                answer_chain=answer_chain,
+                memory_db=memory_db,
+                session_id=f"{session_prefix}-{item['id']}",
+                query_field=query_field,
+                k=k,
+                include_references=include_references,
             )
-
+        else:
+            query = _item_query(item, query_field)
+            console.print(f"[cyan]({index}/{len(items)})[/cyan] {item['id']}: {query}")
+            row = _evaluate_single_turn_item(
+                item=item,
+                query=query,
+                vectorstore=vectorstore,
+                paper_sources=paper_sources,
+                answer_chain=answer_chain,
+                memory_db=memory_db,
+                session_id=f"{session_prefix}-{item['id']}",
+                k=k,
+                include_references=include_references,
+            )
         rows.append(row)
 
     summary = _summarize(rows, k=k, query_field=query_field, with_answers=with_answers)
@@ -148,6 +140,134 @@ def _item_query(item: dict[str, Any], query_field: str) -> str:
     return value.strip()
 
 
+def _is_multi_turn_item(item: dict[str, Any]) -> bool:
+    turns = item.get("turns")
+    return isinstance(turns, list) and bool(turns)
+
+
+def _evaluate_single_turn_item(
+    item: dict[str, Any],
+    query: str,
+    vectorstore,
+    paper_sources: dict[str, str],
+    answer_chain,
+    memory_db: Path,
+    session_id: str,
+    k: int,
+    include_references: bool,
+    reset_answer_memory: bool = True,
+) -> dict[str, Any]:
+    retrieval_rows = _retrieve_rows(
+        vectorstore=vectorstore,
+        query=query,
+        k=k,
+        include_references=include_references,
+    )
+    row = {
+        "id": str(item["id"]),
+        "question": query,
+        "canonical_question": str(item.get("canonical_question", "")),
+        "alias_terms": list(item.get("alias_terms", [])),
+        "type": str(item.get("type", "")),
+        "category": str(item.get("category", "")),
+        "difficulty": str(item.get("difficulty", "")),
+        "target_papers": list(item.get("target_papers", [])),
+        "expected_answer_points": list(item.get("expected_answer_points", [])),
+        "evidence": list(item.get("evidence", [])),
+        "negative_checks": list(item.get("negative_checks", [])),
+        "retrieved": retrieval_rows,
+        "retrieval_metrics": _score_retrieval(item, retrieval_rows, paper_sources),
+    }
+
+    if answer_chain is not None:
+        row.update(
+            _answer_item(
+                chain=answer_chain,
+                query=query,
+                session_id=session_id,
+                memory_db=memory_db,
+                reset_memory=reset_answer_memory,
+            )
+        )
+
+    return row
+
+
+def _evaluate_multi_turn_item(
+    item: dict[str, Any],
+    vectorstore,
+    paper_sources: dict[str, str],
+    answer_chain,
+    memory_db: Path,
+    session_id: str,
+    query_field: str,
+    k: int,
+    include_references: bool,
+) -> dict[str, Any]:
+    if answer_chain is not None:
+        clear_session_history(session_id=session_id, db_path=memory_db)
+
+    turn_rows: list[dict[str, Any]] = []
+    for turn_index, turn in enumerate(item["turns"], start=1):
+        turn_item = _turn_item(item, turn, turn_index)
+        query = _item_query(turn_item, query_field)
+        console.print(f"  [dim]turn {turn_index}:[/dim] {query}")
+        turn_rows.append(
+            _evaluate_single_turn_item(
+                item=turn_item,
+                query=query,
+                vectorstore=vectorstore,
+                paper_sources=paper_sources,
+                answer_chain=answer_chain,
+                memory_db=memory_db,
+                session_id=session_id,
+                k=k,
+                include_references=include_references,
+                reset_answer_memory=False,
+            )
+        )
+
+    return {
+        "id": str(item["id"]),
+        "type": str(item.get("type", "multi_turn")),
+        "category": str(item.get("category", "")),
+        "difficulty": str(item.get("difficulty", "")),
+        "conversation_expectation": str(item.get("conversation_expectation", "")),
+        "turns": turn_rows,
+    }
+
+
+def _turn_item(parent: dict[str, Any], turn: dict[str, Any], turn_index: int) -> dict[str, Any]:
+    turn_id = str(turn.get("turn_id", turn_index))
+    return {
+        "id": f"{parent['id']}:{turn_id}",
+        "parent_id": str(parent["id"]),
+        "turn_id": turn_id,
+        "turn_index": turn_index,
+        "question": str(turn.get("question", "")),
+        "canonical_question": str(turn.get("canonical_question", "")),
+        "alias_terms": _merge_lists(parent.get("alias_terms", []), turn.get("alias_terms", [])),
+        "type": str(turn.get("type", parent.get("type", ""))),
+        "category": str(turn.get("category", parent.get("category", ""))),
+        "difficulty": str(turn.get("difficulty", parent.get("difficulty", ""))),
+        "target_papers": list(turn.get("target_papers", [])),
+        "expected_answer_points": list(turn.get("expected_answer_points", [])),
+        "evidence": list(turn.get("evidence", [])),
+        "negative_checks": list(turn.get("negative_checks", [])),
+    }
+
+
+def _merge_lists(*values: Any) -> list[Any]:
+    merged: list[Any] = []
+    for value in values:
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            if item not in merged:
+                merged.append(item)
+    return merged
+
+
 def _retrieve_rows(vectorstore, query: str, k: int, include_references: bool) -> list[dict[str, Any]]:
     raw_results = hybrid_search_with_score(vectorstore, query, k=max(k * 5, k + 10))
     selected_results = select_retrieval_results(
@@ -185,6 +305,24 @@ def _score_retrieval(
     retrieved_keys = [_row_key(row) for row in retrieved_rows]
     retrieved_sources = [str(row["source"]) for row in retrieved_rows]
 
+    if not target_sources and not evidence_keys:
+        return {
+            "target_paper_hit": None,
+            "all_target_papers_hit": None,
+            "exact_evidence_hit": None,
+            "target_paper_recall": None,
+            "evidence_recall": None,
+            "first_target_paper_rank": None,
+            "first_evidence_rank": None,
+            "mrr_target_paper": None,
+            "mrr_evidence": None,
+            "target_sources": [],
+            "retrieved_target_sources": [],
+            "expected_evidence_count": 0,
+            "retrieved_evidence_count": 0,
+            "expected_no_answer": True,
+        }
+
     evidence_ranks = [
         rank
         for rank, key in enumerate(retrieved_keys, start=1)
@@ -219,12 +357,13 @@ def _score_retrieval(
 
 def _answer_item(
     chain,
-    item: dict[str, Any],
     query: str,
     session_id: str,
     memory_db: Path,
+    reset_memory: bool,
 ) -> dict[str, Any]:
-    clear_session_history(session_id=session_id, db_path=memory_db)
+    if reset_memory:
+        clear_session_history(session_id=session_id, db_path=memory_db)
     try:
         result = chain.invoke(
             {"input": query},
@@ -264,9 +403,11 @@ def _summarize(
     query_field: str,
     with_answers: bool,
 ) -> dict[str, Any]:
-    retrieval_metrics = [row["retrieval_metrics"] for row in rows]
+    scored_rows = list(_iter_scored_rows(rows))
+    retrieval_metrics = [row["retrieval_metrics"] for row in scored_rows]
     summary = {
         "items": len(rows),
+        "turns": len(scored_rows),
         "k": k,
         "query_field": query_field,
         "target_paper_hit_rate": _mean_bool(retrieval_metrics, "target_paper_hit"),
@@ -278,7 +419,7 @@ def _summarize(
         "mrr_evidence": _mean_float(retrieval_metrics, "mrr_evidence"),
     }
     if with_answers:
-        answer_metrics = [row.get("answer_metrics", {}) for row in rows]
+        answer_metrics = [row.get("answer_metrics", {}) for row in scored_rows]
         summary.update(
             {
                 "answer_present_rate": _mean_bool(answer_metrics, "answer_present"),
@@ -287,6 +428,14 @@ def _summarize(
             }
         )
     return summary
+
+
+def _iter_scored_rows(rows: list[dict[str, Any]]):
+    for row in rows:
+        if "turns" in row:
+            yield from row["turns"]
+        else:
+            yield row
 
 
 def _write_csv(csv_path: Path, rows: list[dict[str, Any]]) -> None:
@@ -313,7 +462,7 @@ def _write_csv(csv_path: Path, rows: list[dict[str, Any]]) -> None:
     with csv_path.open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
-        for row in rows:
+        for row in _iter_scored_rows(rows):
             metrics = row["retrieval_metrics"]
             answer_metrics = row.get("answer_metrics", {})
             writer.writerow(
@@ -384,98 +533,149 @@ def _write_markdown_report(markdown_path: Path, payload: dict[str, Any]) -> None
     )
 
     for index, row in enumerate(payload["items"], start=1):
-        metrics = row["retrieval_metrics"]
-        answer_metrics = row.get("answer_metrics", {})
-        lines.extend(
-            [
-                f"### {index}. {row['id']} ({row['difficulty']} | {row['category']})",
-                "",
-                f"**Question:** {row['question']}",
-                "",
-                f"**Canonical intent:** {row['canonical_question']}",
-                "",
-                f"**Aliases:** {_comma_join(row.get('alias_terms', []))}",
-                "",
-                "**Automatic retrieval checks:**",
-                "",
-                f"- target paper hit: `{metrics['target_paper_hit']}`",
-                f"- all target papers hit: `{metrics['all_target_papers_hit']}`",
-                f"- exact evidence hit: `{metrics['exact_evidence_hit']}`",
-                f"- target paper recall: `{_format_metric(metrics['target_paper_recall'])}`",
-                f"- evidence recall: `{_format_metric(metrics['evidence_recall'])}`",
-                f"- first evidence rank: `{metrics['first_evidence_rank']}`",
-                "",
-                "**Model answer:**",
-                "",
-                _answer_block(row),
-                "",
-            ]
-        )
-        if answer_metrics:
+        if "turns" in row:
             lines.extend(
                 [
-                    "**Answer structure checks:**",
+                    f"### {index}. {row['id']} ({row['difficulty']} | {row['category']})",
                     "",
-                    f"- answer present: `{answer_metrics.get('answer_present')}`",
-                    f"- citation present: `{answer_metrics.get('citation_present')}`",
-                    f"- answer length: `{answer_metrics.get('answer_length')}`",
+                    "**Conversation expectation:**",
+                    "",
+                    row.get("conversation_expectation", "_none_") or "_none_",
                     "",
                 ]
             )
+            for turn_index, turn in enumerate(row["turns"], start=1):
+                lines.extend(
+                    _review_item_markdown(
+                        turn,
+                        f"#### Turn {turn_index}. {turn['id']} ({turn['difficulty']} | {turn['category']})",
+                    )
+                )
+            continue
 
-        lines.extend(["**Expected answer points:**", ""])
-        for point in row.get("expected_answer_points", []):
-            lines.append(f"- [ ] {point}")
-        lines.extend(["", "**Negative checks:**", ""])
-        for check in row.get("negative_checks", []):
-            lines.append(f"- [ ] {check}")
-        lines.extend(["", "**Gold evidence:**", ""])
-        for evidence in row.get("evidence", []):
-            terms = _comma_join(evidence.get("must_include_terms", []))
-            lines.append(
-                f"- `{evidence.get('source')}` p.{evidence.get('page')} "
-                f"chunk `{evidence.get('chunk_id')}`; terms: {terms}"
+        lines.extend(
+            _review_item_markdown(
+                row,
+                f"### {index}. {row['id']} ({row['difficulty']} | {row['category']})",
             )
-        lines.extend(["", "**Retrieved sources (top 5):**", ""])
-        lines.extend(_retrieved_sources_table(row))
-        lines.append("")
+        )
 
-    markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
+
+
+def _review_item_markdown(row: dict[str, Any], heading: str) -> list[str]:
+    metrics = row["retrieval_metrics"]
+    answer_metrics = row.get("answer_metrics", {})
+    lines = [
+        heading,
+        "",
+        f"**Question:** {row['question']}",
+        "",
+        f"**Canonical intent:** {row['canonical_question']}",
+        "",
+        f"**Aliases:** {_comma_join(row.get('alias_terms', []))}",
+        "",
+        "**Automatic retrieval checks:**",
+        "",
+        f"- target paper hit: `{metrics['target_paper_hit']}`",
+        f"- all target papers hit: `{metrics['all_target_papers_hit']}`",
+        f"- exact evidence hit: `{metrics['exact_evidence_hit']}`",
+        f"- target paper recall: `{_format_metric(metrics['target_paper_recall'])}`",
+        f"- evidence recall: `{_format_metric(metrics['evidence_recall'])}`",
+        f"- first evidence rank: `{metrics['first_evidence_rank']}`",
+        "",
+        "**Model answer:**",
+        "",
+        _answer_block(row),
+        "",
+    ]
+    if answer_metrics:
+        lines.extend(
+            [
+                "**Answer structure checks:**",
+                "",
+                f"- answer present: `{answer_metrics.get('answer_present')}`",
+                f"- citation present: `{answer_metrics.get('citation_present')}`",
+                f"- answer length: `{answer_metrics.get('answer_length')}`",
+                "",
+            ]
+        )
+
+    lines.extend(["**Expected answer points:**", ""])
+    for point in row.get("expected_answer_points", []):
+        lines.append(f"- [ ] {point}")
+    lines.extend(["", "**Negative checks:**", ""])
+    for check in row.get("negative_checks", []):
+        lines.append(f"- [ ] {check}")
+    lines.extend(["", "**Gold evidence:**", ""])
+    for evidence in row.get("evidence", []):
+        terms = _comma_join(evidence.get("must_include_terms", []))
+        lines.append(
+            f"- `{evidence.get('source')}` p.{evidence.get('page')} "
+            f"chunk `{evidence.get('chunk_id')}`; terms: {terms}"
+        )
+    lines.extend(["", "**Retrieved sources (top 5):**", ""])
+    lines.extend(_retrieved_sources_table(row))
+    lines.append("")
+    return lines
 
 
 def _write_review_jsonl(jsonl_path: Path, payload: dict[str, Any]) -> None:
     with jsonl_path.open("w", encoding="utf-8") as file:
         for row in payload["items"]:
-            record = {
-                "schema": "paper_assistant_rag.review_item.v1",
-                "run_id": payload["run_id"],
-                "dataset_id": payload.get("dataset_id"),
-                "query_field": payload.get("query_field"),
-                "k": payload.get("k"),
-                "id": row["id"],
-                "question": row["question"],
-                "canonical_question": row["canonical_question"],
-                "alias_terms": row.get("alias_terms", []),
-                "type": row["type"],
-                "category": row["category"],
-                "difficulty": row["difficulty"],
-                "answer": row.get("answer", ""),
-                "answer_error": row.get("answer_error", ""),
-                "answer_metrics": row.get("answer_metrics", {}),
-                "expected_answer_points": row.get("expected_answer_points", []),
-                "negative_checks": row.get("negative_checks", []),
-                "gold_evidence": row.get("evidence", []),
-                "retrieval_metrics": row["retrieval_metrics"],
-                "retrieved": row["retrieved"],
-                "manual_review": {
-                    "answer_correctness_0_to_45": None,
-                    "evidence_support_0_to_30": None,
-                    "academic_reading_quality_0_to_15": None,
-                    "citation_format_0_to_10": None,
-                    "notes": "",
-                },
-            }
+            if "turns" in row:
+                record = {
+                    "schema": "paper_assistant_rag.review_conversation.v1",
+                    "run_id": payload["run_id"],
+                    "dataset_id": payload.get("dataset_id"),
+                    "query_field": payload.get("query_field"),
+                    "k": payload.get("k"),
+                    "id": row["id"],
+                    "type": row["type"],
+                    "category": row["category"],
+                    "difficulty": row["difficulty"],
+                    "conversation_expectation": row.get("conversation_expectation", ""),
+                    "turns": [_review_jsonl_turn(turn) for turn in row["turns"]],
+                }
+            else:
+                record = _review_jsonl_turn(row)
+                record.update(
+                    {
+                        "schema": "paper_assistant_rag.review_item.v1",
+                        "run_id": payload["run_id"],
+                        "dataset_id": payload.get("dataset_id"),
+                        "query_field": payload.get("query_field"),
+                        "k": payload.get("k"),
+                    }
+                )
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _review_jsonl_turn(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "question": row["question"],
+        "canonical_question": row["canonical_question"],
+        "alias_terms": row.get("alias_terms", []),
+        "type": row["type"],
+        "category": row["category"],
+        "difficulty": row["difficulty"],
+        "answer": row.get("answer", ""),
+        "answer_error": row.get("answer_error", ""),
+        "answer_metrics": row.get("answer_metrics", {}),
+        "expected_answer_points": row.get("expected_answer_points", []),
+        "negative_checks": row.get("negative_checks", []),
+        "gold_evidence": row.get("evidence", []),
+        "retrieval_metrics": row["retrieval_metrics"],
+        "retrieved": row["retrieved"],
+        "manual_review": {
+            "answer_correctness_0_to_45": None,
+            "evidence_support_0_to_30": None,
+            "academic_reading_quality_0_to_15": None,
+            "citation_format_0_to_10": None,
+            "notes": "",
+        },
+    }
 
 
 def _print_summary(
@@ -575,11 +775,12 @@ def _safe_ratio(numerator: int, denominator: int) -> float:
 
 
 def _mean_bool(rows: list[dict[str, Any]], key: str) -> float:
-    return _mean([1.0 if row.get(key) else 0.0 for row in rows])
+    values = [row.get(key) for row in rows if row.get(key) is not None]
+    return _mean([1.0 if value else 0.0 for value in values])
 
 
 def _mean_float(rows: list[dict[str, Any]], key: str) -> float:
-    return _mean([float(row.get(key) or 0.0) for row in rows])
+    return _mean([float(row.get(key)) for row in rows if row.get(key) is not None])
 
 
 def _mean(values: list[float]) -> float:
