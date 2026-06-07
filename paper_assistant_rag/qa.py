@@ -22,9 +22,8 @@ from paper_assistant_rag.models import build_llm
 from paper_assistant_rag.retrieval import (
     clean_model_output,
     ensure_answer_citations,
-    hybrid_search_with_score,
+    hierarchical_search_with_score,
     normalize_text,
-    select_retrieval_results,
 )
 from paper_assistant_rag.settings import Settings
 from paper_assistant_rag.ui import console, print_answer, print_sources, safe_for_console
@@ -184,14 +183,14 @@ def build_hybrid_retriever(vectorstore, k: int, include_references: bool):
         print_retrieval_query(query)
         # 先多取一些候选，再做参考文献过滤，避免最相关的正文片段被挤掉。
         try:
-            raw_results = hybrid_search_with_score(vectorstore, query, k=max(k * 5, k + 10))
+            selected_results = hierarchical_search_with_score(
+                vectorstore,
+                query=query,
+                k=k,
+                include_references=include_references,
+            )
         except (OpenAIError, HTTPError) as error:
             raise RetrievalServiceError(str(error)) from error
-        selected_results = select_retrieval_results(
-            raw_results,
-            k=k,
-            include_references=include_references,
-        )
         return documents_with_source_metadata(selected_results)
 
     return RunnableLambda(retrieve)

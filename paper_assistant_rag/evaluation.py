@@ -22,9 +22,8 @@ from paper_assistant_rag.qa import (
     source_rows_from_documents,
 )
 from paper_assistant_rag.retrieval import (
-    hybrid_search_with_score,
+    hierarchical_search_with_score,
     normalize_text,
-    select_retrieval_results,
 )
 from paper_assistant_rag.settings import Settings
 from paper_assistant_rag.ui import console
@@ -269,9 +268,9 @@ def _merge_lists(*values: Any) -> list[Any]:
 
 
 def _retrieve_rows(vectorstore, query: str, k: int, include_references: bool) -> list[dict[str, Any]]:
-    raw_results = hybrid_search_with_score(vectorstore, query, k=max(k * 5, k + 10))
-    selected_results = select_retrieval_results(
-        raw_results,
+    selected_results = hierarchical_search_with_score(
+        vectorstore,
+        query=query,
         k=k,
         include_references=include_references,
     )
@@ -284,8 +283,10 @@ def _retrieve_rows(vectorstore, query: str, k: int, include_references: bool) ->
                 "source": str(metadata.get("source", "unknown")),
                 "page": str(metadata.get("page", "?")),
                 "chunk_id": str(metadata.get("chunk_id", "?")),
+                "stable_chunk_id": str(metadata.get("stable_chunk_id", "")),
                 "score": float(score),
                 "snippet": normalize_text(doc.page_content)[:280],
+                "text": normalize_text(doc.page_content),
             }
         )
     return rows
@@ -296,7 +297,8 @@ def _score_retrieval(
     retrieved_rows: list[dict[str, Any]],
     paper_sources: dict[str, str],
 ) -> dict[str, Any]:
-    evidence_keys = {_evidence_key(evidence) for evidence in item.get("evidence", [])}
+    evidence = list(item.get("evidence", []))
+    evidence_keys = {_evidence_key(item) for item in evidence}
     target_sources = {
         paper_sources[paper_id]
         for paper_id in item.get("target_papers", [])
@@ -310,30 +312,38 @@ def _score_retrieval(
             "target_paper_hit": None,
             "all_target_papers_hit": None,
             "exact_evidence_hit": None,
+            "evidence_hit": None,
             "target_paper_recall": None,
             "evidence_recall": None,
+            "exact_evidence_recall": None,
             "first_target_paper_rank": None,
             "first_evidence_rank": None,
+            "first_exact_evidence_rank": None,
             "mrr_target_paper": None,
             "mrr_evidence": None,
+            "mrr_exact_evidence": None,
             "target_sources": [],
             "retrieved_target_sources": [],
             "expected_evidence_count": 0,
             "retrieved_evidence_count": 0,
+            "retrieved_exact_evidence_count": 0,
             "expected_no_answer": True,
         }
 
-    evidence_ranks = [
+    exact_evidence_ranks = [
         rank
         for rank, key in enumerate(retrieved_keys, start=1)
         if key in evidence_keys
     ]
+    evidence_matches = _matched_evidence(evidence, retrieved_rows)
+    evidence_ranks = [rank for rank, _key in evidence_matches]
     target_paper_ranks = [
         rank
         for rank, source in enumerate(retrieved_sources, start=1)
         if source in target_sources
     ]
-    retrieved_evidence = set(retrieved_keys).intersection(evidence_keys)
+    retrieved_exact_evidence = set(retrieved_keys).intersection(evidence_keys)
+    retrieved_evidence = {key for _rank, key in evidence_matches}
     retrieved_target_sources = set(retrieved_sources).intersection(target_sources)
 
     return {
@@ -341,17 +351,22 @@ def _score_retrieval(
         "all_target_papers_hit": target_sources.issubset(retrieved_target_sources)
         if target_sources
         else False,
-        "exact_evidence_hit": bool(evidence_ranks),
+        "exact_evidence_hit": bool(exact_evidence_ranks),
+        "evidence_hit": bool(evidence_ranks),
         "target_paper_recall": _safe_ratio(len(retrieved_target_sources), len(target_sources)),
         "evidence_recall": _safe_ratio(len(retrieved_evidence), len(evidence_keys)),
+        "exact_evidence_recall": _safe_ratio(len(retrieved_exact_evidence), len(evidence_keys)),
         "first_target_paper_rank": min(target_paper_ranks) if target_paper_ranks else None,
         "first_evidence_rank": min(evidence_ranks) if evidence_ranks else None,
+        "first_exact_evidence_rank": min(exact_evidence_ranks) if exact_evidence_ranks else None,
         "mrr_target_paper": 1.0 / min(target_paper_ranks) if target_paper_ranks else 0.0,
         "mrr_evidence": 1.0 / min(evidence_ranks) if evidence_ranks else 0.0,
+        "mrr_exact_evidence": 1.0 / min(exact_evidence_ranks) if exact_evidence_ranks else 0.0,
         "target_sources": sorted(target_sources),
         "retrieved_target_sources": sorted(retrieved_target_sources),
         "expected_evidence_count": len(evidence_keys),
         "retrieved_evidence_count": len(retrieved_evidence),
+        "retrieved_exact_evidence_count": len(retrieved_exact_evidence),
     }
 
 
@@ -412,11 +427,14 @@ def _summarize(
         "query_field": query_field,
         "target_paper_hit_rate": _mean_bool(retrieval_metrics, "target_paper_hit"),
         "all_target_papers_hit_rate": _mean_bool(retrieval_metrics, "all_target_papers_hit"),
+        "evidence_hit_rate": _mean_bool(retrieval_metrics, "evidence_hit"),
         "exact_evidence_hit_rate": _mean_bool(retrieval_metrics, "exact_evidence_hit"),
         "avg_target_paper_recall": _mean_float(retrieval_metrics, "target_paper_recall"),
         "avg_evidence_recall": _mean_float(retrieval_metrics, "evidence_recall"),
+        "avg_exact_evidence_recall": _mean_float(retrieval_metrics, "exact_evidence_recall"),
         "mrr_target_paper": _mean_float(retrieval_metrics, "mrr_target_paper"),
         "mrr_evidence": _mean_float(retrieval_metrics, "mrr_evidence"),
+        "mrr_exact_evidence": _mean_float(retrieval_metrics, "mrr_exact_evidence"),
     }
     if with_answers:
         answer_metrics = [row.get("answer_metrics", {}) for row in scored_rows]
@@ -448,13 +466,17 @@ def _write_csv(csv_path: Path, rows: list[dict[str, Any]]) -> None:
         "difficulty",
         "target_paper_hit",
         "all_target_papers_hit",
+        "evidence_hit",
         "exact_evidence_hit",
         "target_paper_recall",
         "evidence_recall",
+        "exact_evidence_recall",
         "first_target_paper_rank",
         "first_evidence_rank",
+        "first_exact_evidence_rank",
         "mrr_target_paper",
         "mrr_evidence",
+        "mrr_exact_evidence",
         "citation_present",
         "answer_length",
         "retrieved_sources",
@@ -475,13 +497,17 @@ def _write_csv(csv_path: Path, rows: list[dict[str, Any]]) -> None:
                     "difficulty": row["difficulty"],
                     "target_paper_hit": metrics["target_paper_hit"],
                     "all_target_papers_hit": metrics["all_target_papers_hit"],
+                    "evidence_hit": metrics["evidence_hit"],
                     "exact_evidence_hit": metrics["exact_evidence_hit"],
                     "target_paper_recall": metrics["target_paper_recall"],
                     "evidence_recall": metrics["evidence_recall"],
+                    "exact_evidence_recall": metrics["exact_evidence_recall"],
                     "first_target_paper_rank": metrics["first_target_paper_rank"],
                     "first_evidence_rank": metrics["first_evidence_rank"],
+                    "first_exact_evidence_rank": metrics["first_exact_evidence_rank"],
                     "mrr_target_paper": metrics["mrr_target_paper"],
                     "mrr_evidence": metrics["mrr_evidence"],
+                    "mrr_exact_evidence": metrics["mrr_exact_evidence"],
                     "citation_present": answer_metrics.get("citation_present"),
                     "answer_length": answer_metrics.get("answer_length"),
                     "retrieved_sources": " | ".join(
@@ -579,10 +605,13 @@ def _review_item_markdown(row: dict[str, Any], heading: str) -> list[str]:
         "",
         f"- target paper hit: `{metrics['target_paper_hit']}`",
         f"- all target papers hit: `{metrics['all_target_papers_hit']}`",
-        f"- exact evidence hit: `{metrics['exact_evidence_hit']}`",
+        f"- evidence hit: `{metrics.get('evidence_hit')}`",
+        f"- exact chunk-id hit: `{metrics['exact_evidence_hit']}`",
         f"- target paper recall: `{_format_metric(metrics['target_paper_recall'])}`",
         f"- evidence recall: `{_format_metric(metrics['evidence_recall'])}`",
+        f"- exact chunk-id recall: `{_format_metric(metrics.get('exact_evidence_recall'))}`",
         f"- first evidence rank: `{metrics['first_evidence_rank']}`",
+        f"- first exact chunk-id rank: `{metrics.get('first_exact_evidence_rank')}`",
         "",
         "**Model answer:**",
         "",
@@ -711,14 +740,12 @@ def _answer_block(row: dict[str, Any]) -> str:
 
 
 def _retrieved_sources_table(row: dict[str, Any]) -> list[str]:
-    gold_keys = {_evidence_key(evidence) for evidence in row.get("evidence", [])}
     lines = [
         "| Rank | Gold? | Source | Page | Chunk | Snippet |",
         "| ---: | :---: | --- | ---: | ---: | --- |",
     ]
     for source in row.get("retrieved", [])[:5]:
-        row_key = _row_key(source)
-        is_gold = "yes" if row_key in gold_keys else ""
+        is_gold = _retrieved_match_label(row.get("evidence", []), source)
         lines.append(
             "| "
             f"{source.get('rank')} | "
@@ -750,6 +777,66 @@ def _run_id(dataset: dict[str, Any], query_field: str, k: int) -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     dataset_id = str(dataset.get("dataset_id", "eval"))
     return f"{dataset_id}_{query_field}_k{k}_{timestamp}"
+
+
+def _matched_evidence(
+    evidence_items: list[dict[str, Any]],
+    retrieved_rows: list[dict[str, Any]],
+) -> list[tuple[int, tuple[str, str, str]]]:
+    matches: list[tuple[int, tuple[str, str, str]]] = []
+    matched_keys: set[tuple[str, str, str]] = set()
+    for rank, row in enumerate(retrieved_rows, start=1):
+        for evidence in evidence_items:
+            evidence_key = _evidence_key(evidence)
+            if evidence_key in matched_keys:
+                continue
+            if _evidence_matches_row(evidence, row):
+                matches.append((rank, evidence_key))
+                matched_keys.add(evidence_key)
+    return matches
+
+
+def _evidence_matches_row(evidence: dict[str, Any], row: dict[str, Any]) -> bool:
+    if _row_key(row) == _evidence_key(evidence):
+        return True
+
+    evidence_stable_id = str(evidence.get("stable_chunk_id", "")).strip()
+    row_stable_id = str(row.get("stable_chunk_id", "")).strip()
+    if evidence_stable_id and row_stable_id and evidence_stable_id == row_stable_id:
+        return True
+
+    if str(evidence.get("source", "")) != str(row.get("source", "")):
+        return False
+    if str(evidence.get("page", "")) != str(row.get("page", "")):
+        return False
+
+    terms = [str(term) for term in evidence.get("must_include_terms", []) if str(term).strip()]
+    if not terms:
+        return True
+
+    row_text = str(row.get("text") or row.get("snippet") or "")
+    return all(_contains_term(row_text, term) for term in terms)
+
+
+def _retrieved_match_label(evidence_items: list[dict[str, Any]], row: dict[str, Any]) -> str:
+    for evidence in evidence_items:
+        if _row_key(row) == _evidence_key(evidence):
+            return "exact"
+    for evidence in evidence_items:
+        if _evidence_matches_row(evidence, row):
+            return "terms"
+    return ""
+
+
+def _contains_term(text: str, term: str) -> bool:
+    normalized_text = normalize_text(text).lower()
+    normalized_term = normalize_text(term).lower()
+    if normalized_term in normalized_text:
+        return True
+
+    compact_text = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", normalized_text)
+    compact_term = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", normalized_term)
+    return bool(compact_term) and compact_term in compact_text
 
 
 def _evidence_key(evidence: dict[str, Any]) -> tuple[str, str, str]:
