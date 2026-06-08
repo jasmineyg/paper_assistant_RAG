@@ -9,7 +9,7 @@ import typer
 from rich.table import Table
 
 from paper_assistant_rag.evaluation import run_evaluation
-from paper_assistant_rag.indexing import append_to_index, build_index
+from paper_assistant_rag.indexing import append_to_index, build_index, refresh_hierarchical_indexes
 from paper_assistant_rag.paths import (
     DEFAULT_EVAL_DATASET,
     DEFAULT_EVAL_RUN_DIR,
@@ -67,6 +67,14 @@ def append_command(
         chunk_overlap=chunk_overlap,
         skip_existing=skip_existing,
     )
+
+
+@app.command(name="refresh-hierarchy")
+def refresh_hierarchy_command(
+    index_dir: Annotated[Path, typer.Option(help="Directory containing the existing FAISS index.")] = DEFAULT_INDEX_DIR,
+) -> None:
+    """Build or refresh paper-level and section-level indexes from the existing chunk index."""
+    refresh_hierarchical_indexes(index_dir=index_dir)
 
 
 @app.command(name="ask")
@@ -148,6 +156,14 @@ def eval_command(
         str,
         typer.Option(help="Session id prefix used when --with-answers is enabled."),
     ] = "eval",
+    concurrency: Annotated[
+        int,
+        typer.Option(
+            "--concurrency",
+            min=1,
+            help="Number of single-turn evaluation items to run concurrently. Multi-turn items still run sequentially.",
+        ),
+    ] = 12,
 ) -> None:
     """Run a curated RAG evaluation dataset and write metric reports."""
     run_evaluation(
@@ -161,6 +177,7 @@ def eval_command(
         include_references=include_references,
         with_answers=with_answers,
         session_prefix=session_prefix,
+        concurrency=concurrency,
     )
 
 

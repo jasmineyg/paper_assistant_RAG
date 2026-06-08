@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections import defaultdict
+from dataclasses import dataclass
 from math import log1p
 
 from langchain_core.documents import Document
@@ -12,6 +13,23 @@ from langchain_core.documents import Document
 RRF_K = 60
 VECTOR_RRF_WEIGHT = 1.0
 KEYWORD_RRF_WEIGHT = 2.0
+TOP_DOWN_DEFAULT_PAPER_K = 5
+TOP_DOWN_DEFAULT_SECTION_K = 16
+TOP_DOWN_CHUNK_POOL_MULTIPLIER = 8
+
+
+@dataclass(frozen=True)
+class RetrievalScope:
+    """A top-down retrieval range selected by an upper hierarchy layer."""
+
+    level: str
+    source: str
+    score: float
+    node_id: str = ""
+    title: str = ""
+    section_type: str = ""
+    chunk_start: int | None = None
+    chunk_end: int | None = None
 
 QUERY_STOPWORDS = {
     "about",
@@ -134,9 +152,25 @@ def make_context(results: list[tuple[Document, float]], max_chars_per_source: in
     return "\n\n".join(context_blocks), source_rows
 
 
-def hybrid_search_with_score(vectorstore, query: str, k: int) -> list[tuple[Document, float]]:
-    vector_results = vectorstore.similarity_search_with_score(query, k=k)
-    keyword_results = keyword_search_with_score(vectorstore, query, k=k)
+def hybrid_search_with_score(
+    vectorstore,
+    query: str,
+    k: int,
+    metadata_filter=None,
+    fetch_k: int | None = None,
+) -> list[tuple[Document, float]]:
+    vector_results = vectorstore.similarity_search_with_score(
+        query,
+        k=k,
+        filter=metadata_filter,
+        fetch_k=fetch_k or max(k * 4, 20),
+    )
+    keyword_results = keyword_search_with_score(
+        vectorstore,
+        query,
+        k=k,
+        metadata_filter=metadata_filter,
+    )
 
     merged: dict[tuple[str, str, str, str], dict] = {}
 
@@ -167,13 +201,20 @@ def hierarchical_search_with_score(
     k: int,
     include_references: bool,
 ) -> list[tuple[Document, float]]:
-    """Retrieve chunks with paper/section-aware reranking.
+    """Retrieve chunks through a top-down paper -> section -> chunk route."""
+    intent = infer_query_intent(query)
+    top_down_results = _top_down_hierarchical_search(
+        vectorstore=vectorstore,
+        query=query,
+        k=k,
+        intent=intent,
+        include_references=include_references,
+    )
+    if top_down_results:
+        return top_down_results
 
-    This keeps the existing vector + keyword hybrid retrieval as the first-stage
-    candidate generator, then adds a lightweight ArchRAG-lite layer:
-    paper/source scoring, inferred section type scoring, adjacent chunk expansion,
-    and source balancing for broad comparison/list questions.
-    """
+    # Fallback for old indexes or empty hierarchy hits. It keeps the assistant
+    # usable before paper/section auxiliary indexes have been generated.
     raw_k = max(k * 6, k + 20)
     raw_results = hybrid_search_with_score(vectorstore, query, k=raw_k)
     return select_retrieval_results(
@@ -185,13 +226,20 @@ def hierarchical_search_with_score(
     )
 
 
-def keyword_search_with_score(vectorstore, query: str, k: int) -> list[tuple[Document, float]]:
+def keyword_search_with_score(
+    vectorstore,
+    query: str,
+    k: int,
+    metadata_filter=None,
+) -> list[tuple[Document, float]]:
     anchors, weighted_terms = _keyword_terms(query)
     if not anchors:
         return []
 
     results: list[tuple[Document, float]] = []
     for doc in _iter_vectorstore_documents(vectorstore):
+        if metadata_filter is not None and not metadata_filter(doc.metadata):
+            continue
         searchable = _searchable_text(doc)
         if not any(_term_count(searchable, anchor) for anchor in anchors):
             continue
@@ -251,29 +299,179 @@ def select_retrieval_results(
     return (selected + reference_like)[:k]
 
 
-def _select_hierarchical_results(
-    results: list[tuple[Document, float]],
+def _top_down_hierarchical_search(
+    vectorstore,
     query: str,
     k: int,
+    intent: str,
     include_references: bool,
-    vectorstore,
 ) -> list[tuple[Document, float]]:
-    intent = infer_query_intent(query)
+    paper_scopes = _select_paper_scopes(vectorstore, query=query, k=k, intent=intent)
+    if not paper_scopes:
+        return []
+
     documents = _iter_vectorstore_documents(vectorstore)
-    source_scores = _paper_source_scores(
-        documents=documents,
-        initial_results=results,
+    section_scopes = _select_section_scopes(
+        vectorstore,
         query=query,
+        k=k,
+        intent=intent,
+        paper_scopes=paper_scopes,
     )
+    if not section_scopes:
+        section_scopes = _paper_scopes_to_chunk_scopes(documents, paper_scopes)
+    if not section_scopes:
+        return []
+
+    scope_filter = _scope_metadata_filter(section_scopes)
+    chunk_pool = max(k * TOP_DOWN_CHUNK_POOL_MULTIPLIER, k + 20)
+    chunk_results = hybrid_search_with_score(
+        vectorstore,
+        query,
+        k=chunk_pool,
+        metadata_filter=scope_filter,
+        fetch_k=_vectorstore_size(vectorstore),
+    )
+    if not chunk_results:
+        return []
+
     expanded_results = _expand_with_adjacent_chunks(
         vectorstore=vectorstore,
-        results=results,
+        results=chunk_results,
         intent=intent,
         include_references=include_references,
+        metadata_filter=scope_filter,
+    )
+    entries = _rerank_hierarchical_candidates(
+        results=expanded_results,
+        query=query,
+        intent=intent,
+        source_scores=_source_scores_from_scopes([*paper_scopes, *section_scopes]),
+        section_scopes=section_scopes,
+        include_references=include_references,
+    )
+    if _needs_source_coverage(query, intent):
+        return _balanced_source_select(entries, k=k)
+    return entries[:k]
+
+
+def _select_paper_scopes(vectorstore, query: str, k: int, intent: str) -> list[RetrievalScope]:
+    paper_store = getattr(vectorstore, "paper_vectorstore", None)
+    if paper_store is None:
+        return []
+
+    paper_k = _paper_candidate_count(k, intent)
+    paper_hits = paper_store.similarity_search_with_score(
+        query,
+        k=paper_k,
+        fetch_k=max(paper_k * 4, 20),
+    )
+    scopes: list[RetrievalScope] = []
+    for rank, (doc, _distance) in enumerate(paper_hits, start=1):
+        source = str(doc.metadata.get("source", "unknown"))
+        scopes.append(
+            RetrievalScope(
+                level="paper",
+                source=source,
+                score=_rank_score(rank),
+                node_id=str(doc.metadata.get("paper_id", source)),
+                title=str(doc.metadata.get("paper_title", "")),
+            )
+        )
+    return _dedupe_scopes(scopes)
+
+
+def _select_section_scopes(
+    vectorstore,
+    query: str,
+    k: int,
+    intent: str,
+    paper_scopes: list[RetrievalScope],
+) -> list[RetrievalScope]:
+    section_store = getattr(vectorstore, "section_vectorstore", None)
+    if section_store is None:
+        return []
+
+    paper_sources = [scope.source for scope in paper_scopes]
+    paper_source_set = set(paper_sources)
+    paper_scores = {scope.source: scope.score for scope in paper_scopes}
+    section_k = _section_candidate_count(k, intent, len(paper_sources))
+    section_hits = section_store.similarity_search_with_score(
+        query,
+        k=section_k,
+        filter=lambda metadata: str(metadata.get("source", "unknown")) in paper_source_set,
+        fetch_k=_vectorstore_size(section_store),
     )
 
+    scopes: list[RetrievalScope] = []
+    for rank, (doc, _distance) in enumerate(section_hits, start=1):
+        metadata = doc.metadata
+        source = str(metadata.get("source", "unknown"))
+        chunk_start = _int_metadata(metadata.get("chunk_start"))
+        chunk_end = _int_metadata(metadata.get("chunk_end"))
+        if chunk_start is None or chunk_end is None:
+            continue
+
+        section_type = str(metadata.get("section_type", "")).lower()
+        score = (
+            _rank_score(rank)
+            + min(paper_scores.get(source, 0.0), 1.0) * 0.45
+            + _section_type_bonus(intent, section_type)
+        )
+        scopes.append(
+            RetrievalScope(
+                level="section",
+                source=source,
+                score=score,
+                node_id=str(metadata.get("section_id", "")),
+                title=str(metadata.get("section_title", "")),
+                section_type=section_type,
+                chunk_start=chunk_start,
+                chunk_end=chunk_end,
+            )
+        )
+    return _dedupe_scopes(scopes)
+
+
+def _paper_scopes_to_chunk_scopes(
+    documents: list[Document],
+    paper_scopes: list[RetrievalScope],
+) -> list[RetrievalScope]:
+    source_scores = {scope.source: scope.score for scope in paper_scopes}
+    chunk_ranges: dict[str, list[int]] = defaultdict(list)
+    for doc in documents:
+        source = str(doc.metadata.get("source", "unknown"))
+        if source not in source_scores:
+            continue
+        chunk_id = _int_metadata(doc.metadata.get("chunk_id"))
+        if chunk_id is not None:
+            chunk_ranges[source].append(chunk_id)
+
+    scopes: list[RetrievalScope] = []
+    for source, chunk_ids in chunk_ranges.items():
+        scopes.append(
+            RetrievalScope(
+                level="paper",
+                source=source,
+                score=source_scores[source],
+                node_id=source,
+                chunk_start=min(chunk_ids),
+                chunk_end=max(chunk_ids),
+            )
+        )
+    return scopes
+
+
+def _rerank_hierarchical_candidates(
+    results: list[tuple[Document, float]],
+    query: str,
+    intent: str,
+    source_scores: dict[str, float],
+    section_scopes: list[RetrievalScope],
+    include_references: bool,
+) -> list[tuple[Document, float]]:
     entries = []
-    for rank, (doc, base_score) in enumerate(expanded_results, start=1):
+    for rank, (doc, base_score) in enumerate(results, start=1):
         section_type = infer_section_type(doc)
         metadata = dict(doc.metadata)
         metadata["section_type"] = section_type
@@ -284,13 +482,109 @@ def _select_hierarchical_results(
             intent=intent,
             base_score=base_score,
             source_scores=source_scores,
+            section_scopes=section_scopes,
             rank=rank,
             include_references=include_references,
         )
         entries.append((reranked_doc, score))
 
     entries.sort(key=lambda item: item[1], reverse=True)
-    entries = _dedupe_scored_documents(entries)
+    return _dedupe_scored_documents(entries)
+
+
+def _scope_metadata_filter(scopes: list[RetrievalScope]):
+    return lambda metadata: _metadata_in_scopes(metadata, scopes)
+
+
+def _metadata_in_scopes(metadata: dict, scopes: list[RetrievalScope]) -> bool:
+    source = str(metadata.get("source", "unknown"))
+    chunk_id = _int_metadata(metadata.get("chunk_id"))
+    if chunk_id is None:
+        return False
+    for scope in scopes:
+        if scope.source != source:
+            continue
+        if scope.chunk_start is None or scope.chunk_end is None:
+            return True
+        if scope.chunk_start <= chunk_id <= scope.chunk_end:
+            return True
+    return False
+
+
+def _source_scores_from_scopes(scopes: list[RetrievalScope]) -> dict[str, float]:
+    scores: dict[str, float] = defaultdict(float)
+    for scope in scopes:
+        layer_weight = 1.0 if scope.level == "paper" else 0.85
+        scores[scope.source] += max(scope.score, 0.0) * layer_weight
+    if not scores:
+        return {}
+    max_score = max(scores.values()) or 1.0
+    return {source: score / max_score for source, score in scores.items()}
+
+
+def _paper_candidate_count(k: int, intent: str) -> int:
+    if intent == "comparison":
+        return max(TOP_DOWN_DEFAULT_PAPER_K + 2, min(k, 8))
+    if intent in {"summary", "workflow"}:
+        return TOP_DOWN_DEFAULT_PAPER_K
+    return min(TOP_DOWN_DEFAULT_PAPER_K, max(3, k // 2))
+
+
+def _section_candidate_count(k: int, intent: str, paper_count: int) -> int:
+    base = max(TOP_DOWN_DEFAULT_SECTION_K, k * 2, paper_count * 3)
+    if intent in {"summary", "workflow", "comparison"}:
+        return max(base, k * 3)
+    return base
+
+
+def _section_type_bonus(intent: str, section_type: str) -> float:
+    return SECTION_TYPE_WEIGHTS.get(intent, {}).get(section_type, 0.0) * 4.0
+
+
+def _rank_score(rank: int) -> float:
+    return 1.0 / (rank + 1)
+
+
+def _dedupe_scopes(scopes: list[RetrievalScope]) -> list[RetrievalScope]:
+    best: dict[tuple[str, str, int | None, int | None], RetrievalScope] = {}
+    for scope in scopes:
+        key = (scope.level, scope.source, scope.chunk_start, scope.chunk_end)
+        existing = best.get(key)
+        if existing is None or scope.score > existing.score:
+            best[key] = scope
+    return sorted(best.values(), key=lambda scope: scope.score, reverse=True)
+
+
+def _select_hierarchical_results(
+    results: list[tuple[Document, float]],
+    query: str,
+    k: int,
+    include_references: bool,
+    vectorstore,
+) -> list[tuple[Document, float]]:
+    intent = infer_query_intent(query)
+    documents = _iter_vectorstore_documents(vectorstore)
+    index_source_scores, section_scopes = _multi_index_scores(vectorstore, query=query, k=max(k, 8))
+    source_scores = _paper_source_scores(
+        documents=documents,
+        initial_results=results,
+        query=query,
+        extra_scores=index_source_scores,
+    )
+    expanded_results = _expand_with_adjacent_chunks(
+        vectorstore=vectorstore,
+        results=results,
+        intent=intent,
+        include_references=include_references,
+    )
+    entries = _rerank_hierarchical_candidates(
+        results=expanded_results,
+        query=query,
+        intent=intent,
+        source_scores=source_scores,
+        section_scopes=section_scopes,
+        include_references=include_references,
+    )
     if _needs_source_coverage(query, intent):
         return _balanced_source_select(entries, k=k)
     return entries[:k]
@@ -367,6 +661,7 @@ def _hierarchical_score(
     intent: str,
     base_score: float,
     source_scores: dict[str, float],
+    section_scopes: list[RetrievalScope],
     rank: int,
     include_references: bool,
 ) -> float:
@@ -378,6 +673,7 @@ def _hierarchical_score(
     # The first-stage RRF score is small (~0.03), so these boosts are
     # intentionally modest and capped.
     score += min(source_scores.get(source, 0.0), 1.0) * 0.030
+    score += _section_range_boost(doc, section_scopes)
     score += SECTION_TYPE_WEIGHTS.get(intent, {}).get(section_type, 0.0)
     score += _raw_term_hit_boost(query, doc)
     score += 0.004 / max(rank, 1)
@@ -391,6 +687,7 @@ def _paper_source_scores(
     documents: list[Document],
     initial_results: list[tuple[Document, float]],
     query: str,
+    extra_scores: dict[str, float] | None = None,
 ) -> dict[str, float]:
     anchors, _weighted_terms = _keyword_terms(query)
     raw_terms = _raw_query_terms(query)
@@ -402,6 +699,9 @@ def _paper_source_scores(
     for rank, (doc, _score) in enumerate(initial_results, start=1):
         source = str(doc.metadata.get("source", "unknown"))
         scores[source] += 1.0 / (rank + 2)
+
+    for source, score in (extra_scores or {}).items():
+        scores[source] += score
 
     for source, docs in source_docs.items():
         ordered = sorted(docs, key=lambda doc: _int_metadata(doc.metadata.get("chunk_id")) or 0)
@@ -426,11 +726,66 @@ def _paper_source_scores(
     return {source: score / max_score for source, score in scores.items()}
 
 
+def _multi_index_scores(vectorstore, query: str, k: int) -> tuple[dict[str, float], list[RetrievalScope]]:
+    source_scores: dict[str, float] = defaultdict(float)
+    section_scopes: list[RetrievalScope] = []
+
+    paper_store = getattr(vectorstore, "paper_vectorstore", None)
+    if paper_store is not None:
+        for rank, (doc, _distance) in enumerate(paper_store.similarity_search_with_score(query, k=k), start=1):
+            source = str(doc.metadata.get("source", "unknown"))
+            source_scores[source] += 1.4 / (rank + 1)
+
+    section_store = getattr(vectorstore, "section_vectorstore", None)
+    if section_store is not None:
+        for rank, (doc, _distance) in enumerate(section_store.similarity_search_with_score(query, k=k * 2), start=1):
+            metadata = doc.metadata
+            source = str(metadata.get("source", "unknown"))
+            weight = 1.0 / (rank + 1)
+            chunk_start = _int_metadata(metadata.get("chunk_start"))
+            chunk_end = _int_metadata(metadata.get("chunk_end"))
+            source_scores[source] += 0.9 * weight
+            if chunk_start is None or chunk_end is None:
+                continue
+            section_scopes.append(
+                RetrievalScope(
+                    level="section",
+                    source=source,
+                    score=weight,
+                    node_id=str(metadata.get("section_id", "")),
+                    title=str(metadata.get("section_title", "")),
+                    section_type=str(metadata.get("section_type", "")),
+                    chunk_start=chunk_start,
+                    chunk_end=chunk_end,
+                )
+            )
+
+    return dict(source_scores), section_scopes
+
+
+def _section_range_boost(doc: Document, section_scopes: list[RetrievalScope]) -> float:
+    chunk_id = _int_metadata(doc.metadata.get("chunk_id"))
+    if chunk_id is None:
+        return 0.0
+    source = str(doc.metadata.get("source", "unknown"))
+    boost = 0.0
+    for scope in section_scopes:
+        if scope.source != source:
+            continue
+        start = scope.chunk_start
+        end = scope.chunk_end
+        if start is None or end is None or not (start <= chunk_id <= end):
+            continue
+        boost += scope.score * 0.026
+    return min(boost, 0.035)
+
+
 def _expand_with_adjacent_chunks(
     vectorstore,
     results: list[tuple[Document, float]],
     intent: str,
     include_references: bool,
+    metadata_filter=None,
 ) -> list[tuple[Document, float]]:
     if intent not in {"summary", "workflow", "comparison", "definition"}:
         return results
@@ -454,6 +809,8 @@ def _expand_with_adjacent_chunks(
         for offset in offsets:
             neighbor = by_source_chunk.get((source, chunk_id + offset))
             if neighbor is None:
+                continue
+            if metadata_filter is not None and not metadata_filter(neighbor.metadata):
                 continue
             if not include_references and is_reference_like(neighbor.page_content):
                 continue
@@ -655,6 +1012,10 @@ def _has_workflow_intent(normalized_query: str) -> bool:
         term in normalized_query
         for term in ["流程", "步骤", "过程", "workflow", "process", "procedure", "step"]
     )
+
+
+def _vectorstore_size(vectorstore) -> int:
+    return len(_iter_vectorstore_documents(vectorstore))
 
 
 def _iter_vectorstore_documents(vectorstore) -> list[Document]:

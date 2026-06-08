@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,7 @@ def run_evaluation(
     include_references: bool,
     with_answers: bool,
     session_prefix: str,
+    concurrency: int = 1,
 ) -> None:
     dataset = _load_dataset(dataset_path)
     items = list(dataset["items"])
@@ -67,6 +69,143 @@ def run_evaluation(
         for paper in dataset.get("selected_papers", [])
     }
 
+    rows = _evaluate_items(
+        items=items,
+        vectorstore=vectorstore,
+        paper_sources=paper_sources,
+        answer_chain=answer_chain,
+        memory_db=memory_db,
+        session_prefix=session_prefix,
+        query_field=query_field,
+        k=k,
+        include_references=include_references,
+        concurrency=concurrency,
+    )
+
+    summary = _summarize(rows, k=k, query_field=query_field, with_answers=with_answers)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    run_id = _run_id(dataset, query_field=query_field, k=k)
+    json_path = output_dir / f"{run_id}.json"
+    csv_path = output_dir / f"{run_id}.csv"
+    markdown_path = output_dir / f"{run_id}_review.md"
+    jsonl_path = output_dir / f"{run_id}_review.jsonl"
+    payload = {
+        "run_id": run_id,
+        "dataset_id": dataset.get("dataset_id"),
+        "dataset_version": dataset.get("version"),
+        "dataset_path": str(dataset_path),
+        "index_dir": str(index_dir),
+        "query_field": query_field,
+        "k": k,
+        "include_references": include_references,
+        "with_answers": with_answers,
+        "concurrency": concurrency,
+        "summary": summary,
+        "items": rows,
+    }
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _write_csv(csv_path, rows)
+    _write_markdown_report(markdown_path, payload)
+    _write_review_jsonl(jsonl_path, payload)
+    _print_summary(summary, json_path, csv_path, markdown_path, jsonl_path)
+
+
+def _evaluate_items(
+    items: list[dict[str, Any]],
+    vectorstore,
+    paper_sources: dict[str, str],
+    answer_chain,
+    memory_db: Path,
+    session_prefix: str,
+    query_field: str,
+    k: int,
+    include_references: bool,
+    concurrency: int,
+) -> list[dict[str, Any]]:
+    if concurrency < 1:
+        raise ValueError("concurrency must be at least 1.")
+
+    if concurrency == 1:
+        return _evaluate_items_sequentially(
+            items=items,
+            vectorstore=vectorstore,
+            paper_sources=paper_sources,
+            answer_chain=answer_chain,
+            memory_db=memory_db,
+            session_prefix=session_prefix,
+            query_field=query_field,
+            k=k,
+            include_references=include_references,
+        )
+
+    rows: list[dict[str, Any] | None] = [None] * len(items)
+    single_turn_jobs: list[tuple[int, dict[str, Any], str]] = []
+
+    for item_index, item in enumerate(items):
+        if _is_multi_turn_item(item):
+            continue
+        query = _item_query(item, query_field)
+        single_turn_jobs.append((item_index, item, query))
+
+    if single_turn_jobs:
+        console.print(
+            f"[cyan]Running {len(single_turn_jobs)} single-turn item(s) "
+            f"with concurrency={concurrency}...[/cyan]"
+        )
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            future_to_job = {
+                executor.submit(
+                    _evaluate_single_turn_item,
+                    item,
+                    query,
+                    vectorstore,
+                    paper_sources,
+                    answer_chain,
+                    memory_db,
+                    f"{session_prefix}-{item['id']}",
+                    k,
+                    include_references,
+                ): (item_index, item, query)
+                for item_index, item, query in single_turn_jobs
+            }
+            for future in as_completed(future_to_job):
+                item_index, item, query = future_to_job[future]
+                rows[item_index] = future.result()
+                console.print(
+                    f"[cyan]({item_index + 1}/{len(items)})[/cyan] "
+                    f"{item['id']}: {query} [green]done[/green]"
+                )
+
+    for item_index, item in enumerate(items):
+        if not _is_multi_turn_item(item):
+            continue
+        console.print(f"[cyan]({item_index + 1}/{len(items)})[/cyan] {item['id']}: multi-turn")
+        rows[item_index] = _evaluate_multi_turn_item(
+            item=item,
+            vectorstore=vectorstore,
+            paper_sources=paper_sources,
+            answer_chain=answer_chain,
+            memory_db=memory_db,
+            session_id=f"{session_prefix}-{item['id']}",
+            query_field=query_field,
+            k=k,
+            include_references=include_references,
+        )
+
+    return [row for row in rows if row is not None]
+
+
+def _evaluate_items_sequentially(
+    items: list[dict[str, Any]],
+    vectorstore,
+    paper_sources: dict[str, str],
+    answer_chain,
+    memory_db: Path,
+    session_prefix: str,
+    query_field: str,
+    k: int,
+    include_references: bool,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for index, item in enumerate(items, start=1):
         if _is_multi_turn_item(item):
@@ -97,32 +236,7 @@ def run_evaluation(
                 include_references=include_references,
             )
         rows.append(row)
-
-    summary = _summarize(rows, k=k, query_field=query_field, with_answers=with_answers)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    run_id = _run_id(dataset, query_field=query_field, k=k)
-    json_path = output_dir / f"{run_id}.json"
-    csv_path = output_dir / f"{run_id}.csv"
-    markdown_path = output_dir / f"{run_id}_review.md"
-    jsonl_path = output_dir / f"{run_id}_review.jsonl"
-    payload = {
-        "run_id": run_id,
-        "dataset_id": dataset.get("dataset_id"),
-        "dataset_version": dataset.get("version"),
-        "dataset_path": str(dataset_path),
-        "index_dir": str(index_dir),
-        "query_field": query_field,
-        "k": k,
-        "include_references": include_references,
-        "with_answers": with_answers,
-        "summary": summary,
-        "items": rows,
-    }
-    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    _write_csv(csv_path, rows)
-    _write_markdown_report(markdown_path, payload)
-    _write_review_jsonl(jsonl_path, payload)
-    _print_summary(summary, json_path, csv_path, markdown_path, jsonl_path)
+    return rows
 
 
 def _load_dataset(dataset_path: Path) -> dict[str, Any]:

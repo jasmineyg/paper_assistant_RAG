@@ -66,8 +66,9 @@ class SQLiteChatMessageHistory(BaseChatMessageHistory):
 
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.db_path)
-        connection.execute("PRAGMA journal_mode=TRUNCATE")
+        connection = sqlite3.connect(self.db_path, timeout=30)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA busy_timeout=30000")
         return connection
 
     def _ensure_table(self) -> None:
