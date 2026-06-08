@@ -35,7 +35,7 @@ def build_embeddings(settings: Settings):
 
 def build_llm(settings: Settings):
     # LLM/chat 模型负责根据检索到的论文片段生成最终回答。
-    # 默认走本机 Ollama，也保留 DeepSeek 和 OpenAI-compatible 接口。
+    # 默认走本机 Ollama，也保留 DeepSeek、SiliconFlow 和 OpenAI-compatible 接口。
     if settings.llm_provider == "ollama":
         return ChatOllama(
             model=settings.ollama_chat_model,
@@ -50,6 +50,19 @@ def build_llm(settings: Settings):
             model=settings.deepseek_chat_model,
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
+            temperature=settings.temperature,
+        )
+
+    if settings.llm_provider == "siliconflow":
+        if not settings.siliconflow_api_key:
+            raise typer.BadParameter(
+                "SILICONFLOW_API_KEY is required when LLM_PROVIDER=siliconflow. "
+                "OPENAI_API_KEY is also accepted as a fallback for shared OpenAI-compatible config."
+            )
+        return ChatOpenAI(
+            model=settings.siliconflow_chat_model,
+            api_key=settings.siliconflow_api_key,
+            base_url=settings.siliconflow_base_url,
             temperature=settings.temperature,
         )
 

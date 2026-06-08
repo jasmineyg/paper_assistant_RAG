@@ -14,12 +14,14 @@ from httpx import HTTPError
 from openai import OpenAIError
 from rich.table import Table
 
+from paper_assistant_rag.graph_retrieval import retrieve_graph_chunks_with_score
 from paper_assistant_rag.indexing import load_index
 from paper_assistant_rag.memory import clear_session_history
 from paper_assistant_rag.paths import DEFAULT_EVAL_RUN_DIR
 from paper_assistant_rag.qa import (
     MAX_CHARS_PER_SOURCE,
     build_conversational_rag_chain,
+    normalize_retrieval_mode,
     source_rows_from_documents,
 )
 from paper_assistant_rag.retrieval import (
@@ -35,12 +37,14 @@ def run_evaluation(
     index_dir: Path,
     memory_db: Path,
     output_dir: Path,
+    graph_dir: Path,
     k: int,
     limit: int | None,
     query_field: str,
     include_references: bool,
     with_answers: bool,
     session_prefix: str,
+    retrieval_mode: str = "hybrid",
     concurrency: int = 1,
 ) -> None:
     dataset = _load_dataset(dataset_path)
@@ -51,6 +55,7 @@ def run_evaluation(
         raise ValueError("Evaluation dataset has no items to run.")
 
     settings = Settings.from_env()
+    mode = normalize_retrieval_mode(retrieval_mode)
     with console.status("[cyan]Loading FAISS index...[/cyan]", spinner="dots"):
         vectorstore = load_index(index_dir, settings)
 
@@ -62,6 +67,8 @@ def run_evaluation(
             memory_db=memory_db,
             k=k,
             include_references=include_references,
+            graph_dir=graph_dir,
+            retrieval_mode=mode,
         )
 
     paper_sources = {
@@ -79,12 +86,14 @@ def run_evaluation(
         query_field=query_field,
         k=k,
         include_references=include_references,
+        graph_dir=graph_dir,
+        retrieval_mode=mode,
         concurrency=concurrency,
     )
 
     summary = _summarize(rows, k=k, query_field=query_field, with_answers=with_answers)
     output_dir.mkdir(parents=True, exist_ok=True)
-    run_id = _run_id(dataset, query_field=query_field, k=k)
+    run_id = _run_id(dataset, query_field=query_field, k=k, retrieval_mode=mode)
     json_path = output_dir / f"{run_id}.json"
     csv_path = output_dir / f"{run_id}.csv"
     markdown_path = output_dir / f"{run_id}_review.md"
@@ -95,10 +104,12 @@ def run_evaluation(
         "dataset_version": dataset.get("version"),
         "dataset_path": str(dataset_path),
         "index_dir": str(index_dir),
+        "graph_dir": str(graph_dir),
         "query_field": query_field,
         "k": k,
         "include_references": include_references,
         "with_answers": with_answers,
+        "retrieval_mode": mode,
         "concurrency": concurrency,
         "summary": summary,
         "items": rows,
@@ -120,6 +131,8 @@ def _evaluate_items(
     query_field: str,
     k: int,
     include_references: bool,
+    graph_dir: Path,
+    retrieval_mode: str,
     concurrency: int,
 ) -> list[dict[str, Any]]:
     if concurrency < 1:
@@ -136,6 +149,8 @@ def _evaluate_items(
             query_field=query_field,
             k=k,
             include_references=include_references,
+            graph_dir=graph_dir,
+            retrieval_mode=retrieval_mode,
         )
 
     rows: list[dict[str, Any] | None] = [None] * len(items)
@@ -165,6 +180,8 @@ def _evaluate_items(
                     f"{session_prefix}-{item['id']}",
                     k,
                     include_references,
+                    graph_dir,
+                    retrieval_mode,
                 ): (item_index, item, query)
                 for item_index, item, query in single_turn_jobs
             }
@@ -190,6 +207,8 @@ def _evaluate_items(
             query_field=query_field,
             k=k,
             include_references=include_references,
+            graph_dir=graph_dir,
+            retrieval_mode=retrieval_mode,
         )
 
     return [row for row in rows if row is not None]
@@ -205,6 +224,8 @@ def _evaluate_items_sequentially(
     query_field: str,
     k: int,
     include_references: bool,
+    graph_dir: Path,
+    retrieval_mode: str,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for index, item in enumerate(items, start=1):
@@ -220,6 +241,8 @@ def _evaluate_items_sequentially(
                 query_field=query_field,
                 k=k,
                 include_references=include_references,
+                graph_dir=graph_dir,
+                retrieval_mode=retrieval_mode,
             )
         else:
             query = _item_query(item, query_field)
@@ -234,6 +257,8 @@ def _evaluate_items_sequentially(
                 session_id=f"{session_prefix}-{item['id']}",
                 k=k,
                 include_references=include_references,
+                graph_dir=graph_dir,
+                retrieval_mode=retrieval_mode,
             )
         rows.append(row)
     return rows
@@ -268,6 +293,8 @@ def _evaluate_single_turn_item(
     session_id: str,
     k: int,
     include_references: bool,
+    graph_dir: Path,
+    retrieval_mode: str,
     reset_answer_memory: bool = True,
 ) -> dict[str, Any]:
     retrieval_rows = _retrieve_rows(
@@ -275,6 +302,8 @@ def _evaluate_single_turn_item(
         query=query,
         k=k,
         include_references=include_references,
+        graph_dir=graph_dir,
+        retrieval_mode=retrieval_mode,
     )
     row = {
         "id": str(item["id"]),
@@ -316,6 +345,8 @@ def _evaluate_multi_turn_item(
     query_field: str,
     k: int,
     include_references: bool,
+    graph_dir: Path,
+    retrieval_mode: str,
 ) -> dict[str, Any]:
     if answer_chain is not None:
         clear_session_history(session_id=session_id, db_path=memory_db)
@@ -336,6 +367,8 @@ def _evaluate_multi_turn_item(
                 session_id=session_id,
                 k=k,
                 include_references=include_references,
+                graph_dir=graph_dir,
+                retrieval_mode=retrieval_mode,
                 reset_answer_memory=False,
             )
         )
@@ -381,13 +414,30 @@ def _merge_lists(*values: Any) -> list[Any]:
     return merged
 
 
-def _retrieve_rows(vectorstore, query: str, k: int, include_references: bool) -> list[dict[str, Any]]:
-    selected_results = retrieve_chunks_with_score(
-        vectorstore,
-        query=query,
-        k=k,
-        include_references=include_references,
-    )
+def _retrieve_rows(
+    vectorstore,
+    query: str,
+    k: int,
+    include_references: bool,
+    graph_dir: Path,
+    retrieval_mode: str,
+) -> list[dict[str, Any]]:
+    mode = normalize_retrieval_mode(retrieval_mode)
+    if mode == "graph":
+        selected_results = retrieve_graph_chunks_with_score(
+            vectorstore,
+            query=query,
+            k=k,
+            include_references=include_references,
+            graph_dir=graph_dir,
+        )
+    else:
+        selected_results = retrieve_chunks_with_score(
+            vectorstore,
+            query=query,
+            k=k,
+            include_references=include_references,
+        )
     rows: list[dict[str, Any]] = []
     for rank, (doc, score) in enumerate(selected_results, start=1):
         metadata = doc.metadata
@@ -399,6 +449,9 @@ def _retrieve_rows(vectorstore, query: str, k: int, include_references: bool) ->
                 "chunk_id": str(metadata.get("chunk_id", "?")),
                 "stable_chunk_id": str(metadata.get("stable_chunk_id", "")),
                 "score": float(score),
+                "base_rank": str(metadata.get("base_rank", "")),
+                "graph_rank": str(metadata.get("graph_rank", "")),
+                "graph_score": str(metadata.get("graph_score", "")),
                 "snippet": normalize_text(doc.page_content)[:280],
                 "text": normalize_text(doc.page_content),
             }
@@ -640,6 +693,7 @@ def _write_markdown_report(markdown_path: Path, payload: dict[str, Any]) -> None
         "",
         f"- Dataset: `{payload.get('dataset_id')}` v`{payload.get('dataset_version')}`",
         f"- Query field: `{payload.get('query_field')}`",
+        f"- Retrieval mode: `{payload.get('retrieval_mode')}`",
         f"- Top-k: `{payload.get('k')}`",
         f"- Answers generated: `{payload.get('with_answers')}`",
         f"- Include references: `{payload.get('include_references')}`",
@@ -855,8 +909,8 @@ def _answer_block(row: dict[str, Any]) -> str:
 
 def _retrieved_sources_table(row: dict[str, Any]) -> list[str]:
     lines = [
-        "| Rank | Gold? | Source | Page | Chunk | Snippet |",
-        "| ---: | :---: | --- | ---: | ---: | --- |",
+        "| Rank | Gold? | BaseRank | GraphRank | Source | Page | Chunk | Snippet |",
+        "| ---: | :---: | ---: | ---: | --- | ---: | ---: | --- |",
     ]
     for source in row.get("retrieved", [])[:5]:
         is_gold = _retrieved_match_label(row.get("evidence", []), source)
@@ -864,6 +918,8 @@ def _retrieved_sources_table(row: dict[str, Any]) -> list[str]:
             "| "
             f"{source.get('rank')} | "
             f"{is_gold} | "
+            f"{_md_escape(str(source.get('base_rank', '')))} | "
+            f"{_md_escape(str(source.get('graph_rank', '')))} | "
             f"{_md_escape(str(source.get('source', '')))} | "
             f"{_md_escape(str(source.get('page', '')))} | "
             f"{_md_escape(str(source.get('chunk_id', '')))} | "
@@ -887,10 +943,10 @@ def _md_escape(value: str) -> str:
     )
 
 
-def _run_id(dataset: dict[str, Any], query_field: str, k: int) -> str:
+def _run_id(dataset: dict[str, Any], query_field: str, k: int, retrieval_mode: str) -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     dataset_id = str(dataset.get("dataset_id", "eval"))
-    return f"{dataset_id}_{query_field}_k{k}_{timestamp}"
+    return f"{dataset_id}_{query_field}_{retrieval_mode}_k{k}_{timestamp}"
 
 
 def _matched_evidence(

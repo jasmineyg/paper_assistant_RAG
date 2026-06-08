@@ -105,6 +105,7 @@ def ask_command(
     question: Annotated[str, typer.Argument(help="Question to answer from the paper knowledge base.")],
     paper_dir: Annotated[Path, typer.Option(help="Directory containing PDF papers.")] = DEFAULT_PAPER_DIR,
     index_dir: Annotated[Path, typer.Option(help="Directory used to load/save the FAISS index.")] = DEFAULT_INDEX_DIR,
+    graph_dir: Annotated[Path, typer.Option(help="Directory containing KG cache files for graph retrieval.")] = DEFAULT_GRAPH_DIR,
     memory_db: Annotated[Path, typer.Option(help="SQLite database used to persist chat memory.")] = DEFAULT_MEMORY_DB,
     session: Annotated[str, typer.Option(help="Conversation session id used for chat memory.")] = "default",
     reset_memory: Annotated[
@@ -121,6 +122,10 @@ def ask_command(
         bool,
         typer.Option("--include-references", help="Allow bibliography/reference-list chunks in retrieval results."),
     ] = False,
+    retrieval_mode: Annotated[
+        str,
+        typer.Option("--retrieval-mode", help="Retrieval mode: hybrid or graph."),
+    ] = "hybrid",
 ) -> None:
     """Ask with persistent chat memory and return an answer with source snippets."""
     ask_question(
@@ -134,6 +139,8 @@ def ask_command(
         rebuild=rebuild,
         show_snippets=show_snippets,
         include_references=include_references,
+        graph_dir=graph_dir,
+        retrieval_mode=retrieval_mode,
     )
 
 
@@ -155,6 +162,10 @@ def eval_command(
         Path,
         typer.Option(help="Directory for JSON/CSV evaluation reports."),
     ] = DEFAULT_EVAL_RUN_DIR,
+    graph_dir: Annotated[
+        Path,
+        typer.Option(help="Directory containing KG cache files for graph retrieval."),
+    ] = DEFAULT_GRAPH_DIR,
     k: Annotated[int, typer.Option(help="Number of source chunks to retrieve per item.")] = 10,
     limit: Annotated[
         int | None,
@@ -179,6 +190,10 @@ def eval_command(
         str,
         typer.Option(help="Session id prefix used when --with-answers is enabled."),
     ] = "eval",
+    retrieval_mode: Annotated[
+        str,
+        typer.Option("--retrieval-mode", help="Retrieval mode: hybrid or graph."),
+    ] = "hybrid",
     concurrency: Annotated[
         int,
         typer.Option(
@@ -194,12 +209,14 @@ def eval_command(
         index_dir=index_dir,
         memory_db=memory_db,
         output_dir=output_dir,
+        graph_dir=graph_dir,
         k=k,
         limit=limit,
         query_field=query_field,
         include_references=include_references,
         with_answers=with_answers,
         session_prefix=session_prefix,
+        retrieval_mode=retrieval_mode,
         concurrency=concurrency,
     )
 
@@ -220,8 +237,13 @@ def models_command() -> None:
     if settings.llm_provider == "deepseek":
         table.add_row("DEEPSEEK_BASE_URL", settings.deepseek_base_url)
         table.add_row("DEEPSEEK_CHAT_MODEL", settings.deepseek_chat_model)
+    if settings.llm_provider == "siliconflow":
+        table.add_row("SILICONFLOW_BASE_URL", settings.siliconflow_base_url)
+        table.add_row("SILICONFLOW_CHAT_MODEL", settings.siliconflow_chat_model)
     if settings.llm_provider == "openai" or settings.embedding_provider == "openai":
         table.add_row("OPENAI_BASE_URL", settings.openai_base_url or "")
+    if settings.llm_provider == "openai":
         table.add_row("OPENAI_CHAT_MODEL", settings.openai_chat_model)
+    if settings.embedding_provider == "openai":
         table.add_row("OPENAI_EMBED_MODEL", settings.openai_embed_model)
     console.print(table)

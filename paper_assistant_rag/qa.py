@@ -16,6 +16,7 @@ from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from openai import OpenAIError
 
+from paper_assistant_rag.graph_retrieval import retrieve_graph_chunks_with_score
 from paper_assistant_rag.indexing import build_index, index_exists, load_index
 from paper_assistant_rag.memory import clear_session_history, get_session_history
 from paper_assistant_rag.models import build_llm
@@ -89,6 +90,8 @@ def ask_question(
     rebuild: bool,
     show_snippets: bool,
     include_references: bool,
+    graph_dir: Path,
+    retrieval_mode: str,
 ) -> None:
     settings = Settings.from_env()
     if reset_memory:
@@ -115,6 +118,8 @@ def ask_question(
         memory_db=memory_db,
         k=k,
         include_references=include_references,
+        graph_dir=graph_dir,
+        retrieval_mode=retrieval_mode,
     )
     try:
         with console.status("[cyan]正在结合对话记忆检索并生成回答...[/cyan]", spinner="dots"):
@@ -144,9 +149,17 @@ def build_conversational_rag_chain(
     memory_db: Path,
     k: int,
     include_references: bool,
+    graph_dir: Path | None = None,
+    retrieval_mode: str = "hybrid",
 ):
     llm = build_llm(settings)
-    retriever = build_hybrid_retriever(vectorstore, k=k, include_references=include_references)
+    retriever = build_hybrid_retriever(
+        vectorstore,
+        k=k,
+        include_references=include_references,
+        graph_dir=graph_dir,
+        retrieval_mode=retrieval_mode,
+    )
     history_aware_retriever = create_history_aware_retriever(
         llm=llm,
         retriever=retriever,
@@ -178,22 +191,56 @@ def build_conversational_rag_chain(
         )
 
 
-def build_hybrid_retriever(vectorstore, k: int, include_references: bool):
+def build_hybrid_retriever(
+    vectorstore,
+    k: int,
+    include_references: bool,
+    graph_dir: Path | None = None,
+    retrieval_mode: str = "hybrid",
+):
+    mode = normalize_retrieval_mode(retrieval_mode)
+
     def retrieve(query: str) -> list[Document]:
         print_retrieval_query(query)
         # 先多取一些候选，再做参考文献过滤，避免最相关的正文片段被挤掉。
         try:
-            selected_results = retrieve_chunks_with_score(
-                vectorstore,
-                query=query,
-                k=k,
-                include_references=include_references,
-            )
+            if mode == "graph":
+                if graph_dir is None:
+                    raise RetrievalServiceError("graph retrieval requires graph_dir")
+                selected_results = retrieve_graph_chunks_with_score(
+                    vectorstore,
+                    query=query,
+                    k=k,
+                    include_references=include_references,
+                    graph_dir=graph_dir,
+                )
+            else:
+                selected_results = retrieve_chunks_with_score(
+                    vectorstore,
+                    query=query,
+                    k=k,
+                    include_references=include_references,
+                )
         except (OpenAIError, HTTPError) as error:
             raise RetrievalServiceError(str(error)) from error
         return documents_with_source_metadata(selected_results)
 
     return RunnableLambda(retrieve)
+
+
+def normalize_retrieval_mode(retrieval_mode: str) -> str:
+    mode = retrieval_mode.strip().lower().replace("_", "-")
+    aliases = {
+        "hybrid": "hybrid",
+        "chunk": "hybrid",
+        "chunks": "hybrid",
+        "graph": "graph",
+        "kg": "graph",
+        "graph-assisted": "graph",
+    }
+    if mode not in aliases:
+        raise typer.BadParameter("retrieval-mode must be one of: hybrid, graph")
+    return aliases[mode]
 
 
 def print_retrieval_query(query: str) -> None:
@@ -241,6 +288,8 @@ def _chat_base_url(settings: Settings) -> str:
         return settings.ollama_base_url
     if settings.llm_provider == "deepseek":
         return settings.deepseek_base_url
+    if settings.llm_provider == "siliconflow":
+        return settings.siliconflow_base_url
     return settings.openai_base_url or ""
 
 
@@ -249,6 +298,8 @@ def _chat_model(settings: Settings) -> str:
         return settings.ollama_chat_model
     if settings.llm_provider == "deepseek":
         return settings.deepseek_chat_model
+    if settings.llm_provider == "siliconflow":
+        return settings.siliconflow_chat_model
     return settings.openai_chat_model
 
 

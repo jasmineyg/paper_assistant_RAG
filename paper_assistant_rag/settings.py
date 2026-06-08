@@ -15,7 +15,7 @@ from paper_assistant_rag.paths import ROOT_DIR
 @dataclass(frozen=True)
 class Settings:
     # 这里集中保存模型和 API 配置，避免这些配置散落在代码各处。
-    llm_provider: Literal["ollama", "deepseek", "openai"] = "openai"
+    llm_provider: Literal["ollama", "deepseek", "openai", "siliconflow"] = "openai"
     embedding_provider: Literal["ollama", "openai"] = "openai"
     ollama_base_url: str = "http://localhost:11434"
     ollama_chat_model: str = "deepseek-r1:1.5b"
@@ -23,6 +23,9 @@ class Settings:
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_chat_model: str = "deepseek-chat"
+    siliconflow_api_key: str | None = None
+    siliconflow_base_url: str = "https://api.siliconflow.cn/v1"
+    siliconflow_chat_model: str = "Pro/zai-org/GLM-4.7"
     openai_api_key: str | None = None
     openai_base_url: str | None = None
     openai_chat_model: str = "gpt-4o-mini"
@@ -34,7 +37,7 @@ class Settings:
         # 每次运行命令时读取 .env，这样改模型或 API key 不需要改代码。
         load_dotenv(ROOT_DIR / ".env")
         return cls(
-            llm_provider=_env_choice("LLM_PROVIDER", "openai", {"ollama", "deepseek", "openai"}),
+            llm_provider=_env_choice("LLM_PROVIDER", "openai", {"ollama", "deepseek", "openai", "siliconflow"}),
             embedding_provider=_env_choice("EMBEDDING_PROVIDER", "openai", {"ollama", "openai"}),
             ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             ollama_chat_model=os.getenv("OLLAMA_CHAT_MODEL", "deepseek-r1:1.5b"),
@@ -42,6 +45,10 @@ class Settings:
             deepseek_api_key=_empty_to_none(os.getenv("DEEPSEEK_API_KEY")),
             deepseek_base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
             deepseek_chat_model=os.getenv("DEEPSEEK_CHAT_MODEL", "deepseek-chat"),
+            siliconflow_api_key=_empty_to_none(os.getenv("SILICONFLOW_API_KEY"))
+            or _empty_to_none(os.getenv("OPENAI_API_KEY")),
+            siliconflow_base_url=os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"),
+            siliconflow_chat_model=os.getenv("SILICONFLOW_CHAT_MODEL", "Pro/zai-org/GLM-4.7"),
             openai_api_key=_empty_to_none(os.getenv("OPENAI_API_KEY")),
             openai_base_url=_empty_to_none(os.getenv("OPENAI_BASE_URL")),
             openai_chat_model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"),

@@ -13,7 +13,7 @@
 - **参考文献干扰控制**：默认降低 References / 参考文献片段的优先级，避免模型把“被引用论文”误当作“当前论文方法”。
 - **可追溯回答**：回答要求带 `[S1]`、`[S2]` 等来源引用，并在终端展示来源表格和原文片段，方便核验模型输出。
 - **连续追问能力**：使用 SQLite 保存会话历史，支持“它的方法流程是什么？”这类依赖上下文的追问。
-- **多模型兼容**：支持 OpenAI-compatible chat / embedding API，也保留 DeepSeek chat 和本地 Ollama 的可选接口。
+- **多模型兼容**：支持 SiliconFlow、OpenAI-compatible chat / embedding API，也保留 DeepSeek chat 和本地 Ollama 的可选接口。
 
 ## 系统流程
 
@@ -41,7 +41,7 @@ user question + chat history
 - Rich
 - SQLite
 - PyPDF / PyMuPDF
-- OpenAI-compatible API / DeepSeek / Ollama
+- SiliconFlow / OpenAI-compatible API / DeepSeek / Ollama
 
 ## 快速开始
 
@@ -57,15 +57,17 @@ uv sync
 Copy-Item .env.example .env
 ```
 
-在 `.env` 中配置模型服务。默认配置使用 OpenAI-compatible API：
+在 `.env` 中配置模型服务。默认配置使用 SiliconFlow chat API 和 OpenAI-compatible embedding API：
 
 ```env
-LLM_PROVIDER=openai
+LLM_PROVIDER=siliconflow
 EMBEDDING_PROVIDER=openai
-OPENAI_API_KEY=your_api_key
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_CHAT_MODEL=gpt-4o-mini
-OPENAI_EMBED_MODEL=text-embedding-3-small
+SILICONFLOW_API_KEY=your_siliconflow_api_key
+SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
+SILICONFLOW_CHAT_MODEL=Pro/zai-org/GLM-4.7
+OPENAI_API_KEY=your_embedding_api_key
+OPENAI_BASE_URL=https://api.siliconflow.cn/v1
+OPENAI_EMBED_MODEL=Pro/BAAI/bge-m3
 ```
 
 把 PDF 论文放入：
@@ -141,7 +143,17 @@ uv run python main.py ask "这篇论文的核心贡献是什么？" --hide-snipp
 
 ## 配置说明
 
-如果服务同时支持 chat 和 embedding，推荐统一使用 OpenAI-compatible 配置：
+如果使用 SiliconFlow chat API：
+
+```env
+LLM_PROVIDER=siliconflow
+SILICONFLOW_API_KEY=your_siliconflow_api_key
+SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
+SILICONFLOW_CHAT_MODEL=Pro/zai-org/GLM-4.7
+TEMPERATURE=0.2
+```
+
+如果服务同时支持 chat 和 embedding，也可以统一使用 OpenAI-compatible 配置：
 
 ```env
 LLM_PROVIDER=openai

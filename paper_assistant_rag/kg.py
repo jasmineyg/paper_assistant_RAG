@@ -27,33 +27,86 @@ MANIFEST_FILE = "manifest.json"
 
 ENTITY_TYPES = [
     "Paper",
+    "Contribution",
     "Method",
     "Model",
+    "Module",
     "Dataset",
     "Metric",
     "Task",
     "Problem",
+    "Scenario",
     "Concept",
     "Experiment",
+    "Finding",
     "Result",
     "Limitation",
+    "FutureWork",
     "Application",
+    "Author",
+    "Organization",
     "Other",
 ]
 
 RELATION_TYPES = [
     "proposes",
     "uses",
-    "improves",
-    "compares_with",
+    "has_component",
     "evaluated_on",
-    "reports_metric",
-    "addresses_problem",
+    "evaluated_by",
+    "reports_result",
+    "has_finding",
+    "solves",
+    "addresses_scenario",
+    "improves_on",
+    "compares_with",
     "has_limitation",
+    "has_future_work",
+    "similar_to",
+    "defines",
+    "has_property",
+    "formulates_as",
+    "outputs",
+    "supports",
+    "authored_by",
+    "affiliated_with",
     "extends",
     "mentions",
     "other",
 ]
+
+ENTITY_TYPE_ALIASES = {
+    "claim": "Contribution",
+    "conclusion": "Finding",
+    "experimental_conclusion": "Finding",
+    "experimental_finding": "Finding",
+    "future_direction": "FutureWork",
+    "future_work": "FutureWork",
+    "issue": "Problem",
+    "module_component": "Module",
+    "problem_setting": "Scenario",
+    "research_question": "Problem",
+}
+
+RELATION_TYPE_ALIASES = {
+    "address": "solves",
+    "addresses": "solves",
+    "addresses_problem": "solves",
+    "compared_to": "compares_with",
+    "contains": "has_component",
+    "employs": "uses",
+    "evaluated_by_metric": "evaluated_by",
+    "has_metric": "evaluated_by",
+    "has_result": "reports_result",
+    "introduces": "proposes",
+    "is_evaluated_by": "evaluated_by",
+    "is_evaluated_on": "evaluated_on",
+    "related_to": "similar_to",
+    "reports_metric": "evaluated_by",
+    "solves_problem": "solves",
+    "uses_component": "has_component",
+    "improves": "improves_on",
+}
 
 
 def build_kg_cache(
@@ -227,10 +280,44 @@ Return valid JSON only, with this exact shape:
 }}
 
 Guidelines:
-- Prefer high-signal academic entities: methods, models, datasets, metrics, tasks, problems, experiments, results, limitations, applications, and paper names.
-- Keep at most 12 entities and 16 relations.
+- Prefer high-signal academic paper entities:
+  - Contribution: claimed novelty, main contribution, key design choice, or proposed idea.
+  - Finding: important experimental finding, ablation conclusion, or core empirical conclusion.
+  - Problem: challenge or research problem the paper explicitly tries to solve.
+  - Scenario: application/problem setting, e.g. weakly supervised pathology or long-document QA.
+  - Dataset: named dataset or clearly described benchmark/data collection.
+  - Metric: evaluation metric such as accuracy, AUC, F1, mAP, retrieval recall, or latency.
+  - Limitation: explicit weakness, failure case, assumption, or unresolved issue.
+  - FutureWork: explicit future direction or suggested extension.
+  - Module: named component inside a method/model, such as encoder, pooling layer, graph module, retriever, reranker, loss, or attention block.
+- Keep at most 14 entities and 20 relations.
 - If the chunk only contains references or unusable text, return empty arrays.
 - Preserve original acronyms and method names exactly when visible.
+- Avoid vague entities such as "new method", "current model", "other methods", "function f", "function g", or "the proposed approach" unless the chunk gives a specific name or a formal object worth retrieving later.
+- Prefer specific contribution/finding names over generic method names. Example: use "trainable attention-based MIL pooling" instead of "new MIL method".
+- Do not treat table checkmarks or feature columns as "uses". For comparison tables, prefer compares_with, has_property, evaluated_by, or skip the fragment if the relation would be weak.
+- Use "other" only when the relation is important for retrieval and cannot fit any listed predicate.
+- Relation selection hints:
+  - proposes: Paper -> Contribution/Method/Model.
+  - uses: Method/Model -> Dataset/Concept/Method when it actually employs that resource or technique.
+  - has_component: Method/Model -> Module/Concept.
+  - evaluated_on: Method/Model/Experiment -> Dataset/Task.
+  - evaluated_by: Method/Model/Experiment -> Metric.
+  - reports_result: Experiment/Method/Paper -> Result.
+  - has_finding: Paper/Method/Experiment -> Finding.
+  - solves: Method/Contribution/Paper -> Problem/Task.
+  - addresses_scenario: Paper/Method -> Scenario/Application.
+  - improves_on: Method/Contribution -> Method/Model/Concept being improved.
+  - compares_with: Method/Model/Paper -> baseline Method/Model/Paper.
+  - has_limitation: Paper/Method/Model -> Limitation.
+  - has_future_work: Paper/Method -> FutureWork.
+  - defines: Paper/Concept/Theorem -> Concept/Metric/Task.
+  - has_property: Method/Concept/Module -> Concept/Finding.
+  - formulates_as: Problem/Task/Method -> Concept/Metric/objective formulation.
+  - outputs: Method/Module/Model -> Metric/Result/Concept.
+  - supports: Finding/Result/Experiment -> Contribution/Claim.
+  - similar_to: Method/Concept -> Method/Concept.
+  - authored_by and affiliated_with: only for explicit paper metadata, not cited references.
 
 Chunk metadata:
 source: {metadata.get("source", "unknown")}
@@ -293,7 +380,7 @@ def _merge_graph_records(records: list[dict[str, Any]]) -> tuple[list[dict[str, 
             name = str(entity.get("name", "")).strip()
             if not name:
                 continue
-            entity_type = _clean_type(str(entity.get("type", "Other")), ENTITY_TYPES)
+            entity_type = _clean_type(str(entity.get("type", "Other")), ENTITY_TYPES, ENTITY_TYPE_ALIASES)
             entity_names = _entity_names(entity)
             entity_key = _find_entity_key(entity_names, entity_name_index) or _entity_key(name)
             for entity_name in entity_names:
@@ -340,7 +427,7 @@ def _merge_graph_records(records: list[dict[str, Any]]) -> tuple[list[dict[str, 
             object_key = _resolve_entity_key(relation.get("object", ""), local_entity_keys, entity_map)
             if not subject_key or not object_key or subject_key == object_key:
                 continue
-            predicate = _clean_type(str(relation.get("predicate", "other")), RELATION_TYPES)
+            predicate = _clean_type(str(relation.get("predicate", "other")), RELATION_TYPES, RELATION_TYPE_ALIASES)
             relation_key = f"{subject_key}|{predicate}|{object_key}"
             merged = relation_map.setdefault(
                 relation_key,
@@ -369,7 +456,7 @@ def _normalize_entities(raw_entities: Any) -> list[dict[str, Any]]:
     if not isinstance(raw_entities, list):
         return []
     entities: list[dict[str, Any]] = []
-    for raw in raw_entities[:12]:
+    for raw in raw_entities[:14]:
         if not isinstance(raw, dict):
             continue
         name = str(raw.get("name", "")).strip()
@@ -384,7 +471,7 @@ def _normalize_entities(raw_entities: Any) -> list[dict[str, Any]]:
         entities.append(
             {
                 "name": name[:160],
-                "type": _clean_type(str(raw.get("type", "Other")), ENTITY_TYPES),
+                "type": _clean_type(str(raw.get("type", "Other")), ENTITY_TYPES, ENTITY_TYPE_ALIASES),
                 "aliases": [str(alias).strip()[:160] for alias in aliases if str(alias).strip()][:8],
                 "description": str(raw.get("description", "")).strip()[:600],
                 "attributes": {str(k)[:80]: str(v)[:300] for k, v in attributes.items()},
@@ -397,7 +484,7 @@ def _normalize_relations(raw_relations: Any) -> list[dict[str, Any]]:
     if not isinstance(raw_relations, list):
         return []
     relations: list[dict[str, Any]] = []
-    for raw in raw_relations[:16]:
+    for raw in raw_relations[:20]:
         if not isinstance(raw, dict):
             continue
         subject = str(raw.get("subject", "")).strip()
@@ -407,10 +494,10 @@ def _normalize_relations(raw_relations: Any) -> list[dict[str, Any]]:
         relations.append(
             {
                 "subject": subject[:160],
-                "predicate": _clean_type(str(raw.get("predicate", "other")), RELATION_TYPES),
+                "predicate": _clean_type(str(raw.get("predicate", "other")), RELATION_TYPES, RELATION_TYPE_ALIASES),
                 "object": obj[:160],
                 "description": str(raw.get("description", "")).strip()[:600],
-                "evidence": str(raw.get("evidence", "")).strip()[:600],
+                "evidence": _evidence_text(raw.get("evidence", "")).strip()[:600],
             }
         )
     return relations
@@ -421,6 +508,12 @@ def _response_text(response) -> str:
     if isinstance(content, list):
         return "\n".join(str(part.get("text", part)) if isinstance(part, dict) else str(part) for part in content)
     return str(content)
+
+
+def _evidence_text(value: Any) -> str:
+    if isinstance(value, list):
+        return " | ".join(str(item).strip() for item in value if str(item).strip())
+    return str(value)
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:
@@ -621,17 +714,24 @@ def _canonical_name(name: str) -> str:
 def _primary_entity_type(observed_types: list[str]) -> str:
     priority = [
         "Paper",
+        "Contribution",
         "Method",
         "Model",
+        "Module",
         "Dataset",
         "Metric",
         "Task",
         "Problem",
-        "Concept",
-        "Experiment",
+        "Scenario",
+        "Finding",
         "Result",
         "Limitation",
+        "FutureWork",
         "Application",
+        "Concept",
+        "Experiment",
+        "Author",
+        "Organization",
         "Other",
     ]
     for entity_type in priority:
@@ -640,8 +740,10 @@ def _primary_entity_type(observed_types: list[str]) -> str:
     return "Other"
 
 
-def _clean_type(value: str, allowed: list[str]) -> str:
+def _clean_type(value: str, allowed: list[str], aliases: dict[str, str] | None = None) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+    if aliases and normalized in aliases:
+        return aliases[normalized]
     lookup = {re.sub(r"[^a-z0-9]+", "_", item.lower()).strip("_"): item for item in allowed}
     return lookup.get(normalized, allowed[-1])
 
