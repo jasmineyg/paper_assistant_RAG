@@ -23,8 +23,8 @@ from paper_assistant_rag.qa import (
     source_rows_from_documents,
 )
 from paper_assistant_rag.retrieval import (
-    hierarchical_search_with_score,
     normalize_text,
+    retrieve_chunks_with_score,
 )
 from paper_assistant_rag.settings import Settings
 from paper_assistant_rag.ui import console
@@ -382,7 +382,7 @@ def _merge_lists(*values: Any) -> list[Any]:
 
 
 def _retrieve_rows(vectorstore, query: str, k: int, include_references: bool) -> list[dict[str, Any]]:
-    selected_results = hierarchical_search_with_score(
+    selected_results = retrieve_chunks_with_score(
         vectorstore,
         query=query,
         k=k,

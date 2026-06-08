@@ -9,10 +9,12 @@ import typer
 from rich.table import Table
 
 from paper_assistant_rag.evaluation import run_evaluation
-from paper_assistant_rag.indexing import append_to_index, build_index, refresh_hierarchical_indexes
+from paper_assistant_rag.indexing import append_to_index, build_index
+from paper_assistant_rag.kg import build_kg_cache
 from paper_assistant_rag.paths import (
     DEFAULT_EVAL_DATASET,
     DEFAULT_EVAL_RUN_DIR,
+    DEFAULT_GRAPH_DIR,
     DEFAULT_INDEX_DIR,
     DEFAULT_MEMORY_DB,
     DEFAULT_PAPER_DIR,
@@ -69,12 +71,33 @@ def append_command(
     )
 
 
-@app.command(name="refresh-hierarchy")
-def refresh_hierarchy_command(
-    index_dir: Annotated[Path, typer.Option(help="Directory containing the existing FAISS index.")] = DEFAULT_INDEX_DIR,
+@app.command(name="kg-build")
+def kg_build_command(
+    index_dir: Annotated[Path, typer.Option(help="Directory containing the existing chunk FAISS index.")] = DEFAULT_INDEX_DIR,
+    graph_dir: Annotated[Path, typer.Option(help="Directory used to save KG extraction cache files.")] = DEFAULT_GRAPH_DIR,
+    limit: Annotated[
+        int | None,
+        typer.Option(help="Extract only the first N chunks for a smoke test."),
+    ] = None,
+    force: Annotated[bool, typer.Option("--force", help="Rebuild KG cache files instead of reusing successful chunks.")] = False,
+    max_chars_per_chunk: Annotated[
+        int,
+        typer.Option(help="Maximum chunk text characters sent to the LLM extractor."),
+    ] = 2500,
+    concurrency: Annotated[
+        int,
+        typer.Option("--concurrency", min=1, help="Number of chunks to extract concurrently."),
+    ] = 1,
 ) -> None:
-    """Build or refresh paper-level and section-level indexes from the existing chunk index."""
-    refresh_hierarchical_indexes(index_dir=index_dir)
+    """Extract entity/relation cache files from indexed chunks."""
+    build_kg_cache(
+        index_dir=index_dir,
+        graph_dir=graph_dir,
+        limit=limit,
+        force=force,
+        max_chars_per_chunk=max_chars_per_chunk,
+        concurrency=concurrency,
+    )
 
 
 @app.command(name="ask")

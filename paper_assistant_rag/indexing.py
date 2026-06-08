@@ -9,7 +9,6 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 
 from paper_assistant_rag.documents import find_pdf_paths, load_pdf_files, load_pdf_pages, split_pages
-from paper_assistant_rag.hierarchy import build_paper_documents, build_section_documents
 from paper_assistant_rag.models import build_embeddings
 from paper_assistant_rag.paths import DEFAULT_EMBED_BATCH_SIZE
 from paper_assistant_rag.settings import Settings
@@ -18,11 +17,6 @@ from paper_assistant_rag.ui import console, create_progress
 
 def index_exists(index_dir: Path) -> bool:
     return (index_dir / "index.faiss").exists() and (index_dir / "index.pkl").exists()
-
-
-def auxiliary_index_exists(index_dir: Path, name: str) -> bool:
-    path = index_dir / name
-    return (path / "index.faiss").exists() and (path / "index.pkl").exists()
 
 
 def build_index(
@@ -41,7 +35,7 @@ def build_index(
 
     index_dir.mkdir(parents=True, exist_ok=True)
 
-    console.print("[bold]Building paper index[/bold]")
+    console.print("[bold]Building chunk index[/bold]")
     pages = load_pdf_pages(paper_dir)
     with console.status("[cyan]Splitting paper text...[/cyan]", spinner="dots"):
         chunks = split_pages(pages, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
@@ -51,7 +45,6 @@ def build_index(
     vectorstore = build_vectorstore_with_progress(chunks, embeddings)
     with console.status("[cyan]Saving FAISS index...[/cyan]", spinner="dots"):
         vectorstore.save_local(str(index_dir))
-    save_hierarchical_indexes(index_dir=index_dir, chunks=chunks, embeddings=embeddings)
     console.print(f"Saved FAISS index to [cyan]{index_dir}[/cyan]")
 
 
@@ -97,35 +90,12 @@ def append_to_index(
     added_count = add_documents_with_progress(vectorstore, chunks, embeddings)
     with console.status("[cyan]Saving updated FAISS index...[/cyan]", spinner="dots"):
         vectorstore.save_local(str(index_dir))
-    with console.status("[cyan]Refreshing paper/section indexes...[/cyan]", spinner="dots"):
-        save_hierarchical_indexes(
-            index_dir=index_dir,
-            chunks=_iter_index_documents(vectorstore),
-            embeddings=embeddings,
-        )
-    console.print("[bold]Added paper indexes[/bold]")
+    console.print("[bold]Added PDF chunks[/bold]")
     for pdf_path in pdf_paths:
         chunk_count = chunk_counts.get(pdf_path.name, 0)
         if chunk_count:
             console.print(f"- {pdf_path.name} ({chunk_count} chunks)")
     console.print(f"Appended {added_count} chunks to [cyan]{index_dir}[/cyan]")
-
-
-def refresh_hierarchical_indexes(index_dir: Path) -> None:
-    settings = Settings.from_env()
-    embeddings = build_embeddings(settings)
-    with console.status("[cyan]Loading existing FAISS index...[/cyan]", spinner="dots"):
-        vectorstore = FAISS.load_local(
-            str(index_dir),
-            embeddings,
-            allow_dangerous_deserialization=True,
-        )
-    chunks = _iter_index_documents(vectorstore)
-    if not chunks:
-        console.print("[yellow]No chunk documents found in the existing index.[/yellow]")
-        return
-    save_hierarchical_indexes(index_dir=index_dir, chunks=chunks, embeddings=embeddings)
-    console.print(f"Saved paper/section indexes under [cyan]{index_dir}[/cyan]")
 
 
 def build_vectorstore_with_progress(chunks: list[Document], embeddings) -> FAISS:
@@ -171,46 +141,11 @@ def _load_index_with_embeddings(index_dir: Path, embeddings) -> FAISS:
         raise typer.BadParameter(
             f"Index not found at {index_dir}. Run `uv run python main.py index` first."
         )
-    vectorstore = FAISS.load_local(
+    return FAISS.load_local(
         str(index_dir),
         embeddings,
         allow_dangerous_deserialization=True,
     )
-    attach_hierarchical_indexes(vectorstore, index_dir=index_dir, embeddings=embeddings)
-    return vectorstore
-
-
-def save_hierarchical_indexes(index_dir: Path, chunks: list[Document], embeddings) -> None:
-    paper_docs = build_paper_documents(chunks)
-    section_docs = build_section_documents(chunks)
-    if paper_docs:
-        console.print(f"Building paper-level index ({len(paper_docs)} papers).")
-        paper_index = build_vectorstore_with_progress(paper_docs, embeddings)
-        paper_index.save_local(str(index_dir / "paper_index"))
-    if section_docs:
-        console.print(f"Building section-level index ({len(section_docs)} sections).")
-        section_index = build_vectorstore_with_progress(section_docs, embeddings)
-        section_index.save_local(str(index_dir / "section_index"))
-
-
-def attach_hierarchical_indexes(vectorstore: FAISS, index_dir: Path, embeddings) -> None:
-    if auxiliary_index_exists(index_dir, "paper_index"):
-        vectorstore.paper_vectorstore = FAISS.load_local(
-            str(index_dir / "paper_index"),
-            embeddings,
-            allow_dangerous_deserialization=True,
-        )
-    else:
-        vectorstore.paper_vectorstore = None
-
-    if auxiliary_index_exists(index_dir, "section_index"):
-        vectorstore.section_vectorstore = FAISS.load_local(
-            str(index_dir / "section_index"),
-            embeddings,
-            allow_dangerous_deserialization=True,
-        )
-    else:
-        vectorstore.section_vectorstore = None
 
 
 def _existing_source_names(vectorstore: FAISS) -> set[str]:

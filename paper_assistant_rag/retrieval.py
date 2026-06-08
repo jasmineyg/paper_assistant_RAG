@@ -1,11 +1,9 @@
-"""Retrieval post-processing, reference filtering, context formatting, and answer cleanup."""
+"""Chunk retrieval, context formatting, and answer cleanup helpers."""
 
 from __future__ import annotations
 
 import re
 import unicodedata
-from collections import defaultdict
-from dataclasses import dataclass
 from math import log1p
 
 from langchain_core.documents import Document
@@ -13,23 +11,6 @@ from langchain_core.documents import Document
 RRF_K = 60
 VECTOR_RRF_WEIGHT = 1.0
 KEYWORD_RRF_WEIGHT = 2.0
-TOP_DOWN_DEFAULT_PAPER_K = 5
-TOP_DOWN_DEFAULT_SECTION_K = 16
-TOP_DOWN_CHUNK_POOL_MULTIPLIER = 8
-
-
-@dataclass(frozen=True)
-class RetrievalScope:
-    """A top-down retrieval range selected by an upper hierarchy layer."""
-
-    level: str
-    source: str
-    score: float
-    node_id: str = ""
-    title: str = ""
-    section_type: str = ""
-    chunk_start: int | None = None
-    chunk_end: int | None = None
 
 QUERY_STOPWORDS = {
     "about",
@@ -83,52 +64,8 @@ WORKFLOW_INTENT_TERMS = {
     "workflow": 1.6,
 }
 
-SECTION_TYPE_WEIGHTS = {
-    "definition": {
-        "abstract": 0.028,
-        "method": 0.018,
-        "conclusion": 0.006,
-        "related": -0.006,
-        "references": -0.035,
-    },
-    "workflow": {
-        "method": 0.032,
-        "abstract": 0.012,
-        "conclusion": 0.006,
-        "related": -0.006,
-        "references": -0.035,
-    },
-    "summary": {
-        "abstract": 0.024,
-        "method": 0.016,
-        "conclusion": 0.014,
-        "experiment": 0.006,
-        "references": -0.035,
-    },
-    "comparison": {
-        "abstract": 0.016,
-        "method": 0.018,
-        "conclusion": 0.010,
-        "experiment": 0.006,
-        "references": -0.035,
-    },
-    "citation": {
-        "references": 0.022,
-        "related": 0.014,
-        "abstract": 0.006,
-    },
-    "specific": {
-        "abstract": 0.006,
-        "method": 0.006,
-        "references": -0.030,
-    },
-}
-
 
 def make_context(results: list[tuple[Document, float]], max_chars_per_source: int) -> tuple[str, list[dict[str, str]]]:
-    # 同一批检索结果要整理成两份：
-    # 1. context_blocks 给 LLM 阅读；
-    # 2. source_rows 给用户查看来源。
     context_blocks: list[str] = []
     source_rows: list[dict[str, str]] = []
 
@@ -150,6 +87,17 @@ def make_context(results: list[tuple[Document, float]], max_chars_per_source: in
         )
 
     return "\n\n".join(context_blocks), source_rows
+
+
+def retrieve_chunks_with_score(
+    vectorstore,
+    query: str,
+    k: int,
+    include_references: bool,
+) -> list[tuple[Document, float]]:
+    raw_k = max(k * 6, k + 20)
+    raw_results = hybrid_search_with_score(vectorstore, query=query, k=raw_k)
+    return select_retrieval_results(raw_results, k=k, include_references=include_references)
 
 
 def hybrid_search_with_score(
@@ -195,37 +143,6 @@ def hybrid_search_with_score(
     return [(entry["doc"], _hybrid_rrf_score(entry)) for entry in ranked[:k]]
 
 
-def hierarchical_search_with_score(
-    vectorstore,
-    query: str,
-    k: int,
-    include_references: bool,
-) -> list[tuple[Document, float]]:
-    """Retrieve chunks through a top-down paper -> section -> chunk route."""
-    intent = infer_query_intent(query)
-    top_down_results = _top_down_hierarchical_search(
-        vectorstore=vectorstore,
-        query=query,
-        k=k,
-        intent=intent,
-        include_references=include_references,
-    )
-    if top_down_results:
-        return top_down_results
-
-    # Fallback for old indexes or empty hierarchy hits. It keeps the assistant
-    # usable before paper/section auxiliary indexes have been generated.
-    raw_k = max(k * 6, k + 20)
-    raw_results = hybrid_search_with_score(vectorstore, query, k=raw_k)
-    return select_retrieval_results(
-        raw_results,
-        k=k,
-        include_references=include_references,
-        query=query,
-        vectorstore=vectorstore,
-    )
-
-
 def keyword_search_with_score(
     vectorstore,
     query: str,
@@ -268,23 +185,10 @@ def select_retrieval_results(
     results: list[tuple[Document, float]],
     k: int,
     include_references: bool,
-    query: str = "",
-    vectorstore=None,
 ) -> list[tuple[Document, float]]:
-    if query and vectorstore is not None:
-        return _select_hierarchical_results(
-            results=results,
-            query=query,
-            k=k,
-            include_references=include_references,
-            vectorstore=vectorstore,
-        )
-
     if include_references:
         return results[:k]
 
-    # 普通问答里，参考文献列表容易干扰模型，所以默认把它们排到后面。
-    # 做 Related Work 检索时，可以用 --include-references 关闭这个过滤。
     selected: list[tuple[Document, float]] = []
     reference_like: list[tuple[Document, float]] = []
 
@@ -299,629 +203,7 @@ def select_retrieval_results(
     return (selected + reference_like)[:k]
 
 
-def _top_down_hierarchical_search(
-    vectorstore,
-    query: str,
-    k: int,
-    intent: str,
-    include_references: bool,
-) -> list[tuple[Document, float]]:
-    paper_scopes = _select_paper_scopes(vectorstore, query=query, k=k, intent=intent)
-    if not paper_scopes:
-        return []
-
-    documents = _iter_vectorstore_documents(vectorstore)
-    section_scopes = _select_section_scopes(
-        vectorstore,
-        query=query,
-        k=k,
-        intent=intent,
-        paper_scopes=paper_scopes,
-    )
-    if not section_scopes:
-        section_scopes = _paper_scopes_to_chunk_scopes(documents, paper_scopes)
-    if not section_scopes:
-        return []
-
-    scope_filter = _scope_metadata_filter(section_scopes)
-    chunk_pool = max(k * TOP_DOWN_CHUNK_POOL_MULTIPLIER, k + 20)
-    chunk_results = hybrid_search_with_score(
-        vectorstore,
-        query,
-        k=chunk_pool,
-        metadata_filter=scope_filter,
-        fetch_k=_vectorstore_size(vectorstore),
-    )
-    if not chunk_results:
-        return []
-
-    expanded_results = _expand_with_adjacent_chunks(
-        vectorstore=vectorstore,
-        results=chunk_results,
-        intent=intent,
-        include_references=include_references,
-        metadata_filter=scope_filter,
-    )
-    entries = _rerank_hierarchical_candidates(
-        results=expanded_results,
-        query=query,
-        intent=intent,
-        source_scores=_source_scores_from_scopes([*paper_scopes, *section_scopes]),
-        section_scopes=section_scopes,
-        include_references=include_references,
-    )
-    if _needs_source_coverage(query, intent):
-        return _balanced_source_select(entries, k=k)
-    return entries[:k]
-
-
-def _select_paper_scopes(vectorstore, query: str, k: int, intent: str) -> list[RetrievalScope]:
-    paper_store = getattr(vectorstore, "paper_vectorstore", None)
-    if paper_store is None:
-        return []
-
-    paper_k = _paper_candidate_count(k, intent)
-    paper_hits = paper_store.similarity_search_with_score(
-        query,
-        k=paper_k,
-        fetch_k=max(paper_k * 4, 20),
-    )
-    scopes: list[RetrievalScope] = []
-    for rank, (doc, _distance) in enumerate(paper_hits, start=1):
-        source = str(doc.metadata.get("source", "unknown"))
-        scopes.append(
-            RetrievalScope(
-                level="paper",
-                source=source,
-                score=_rank_score(rank),
-                node_id=str(doc.metadata.get("paper_id", source)),
-                title=str(doc.metadata.get("paper_title", "")),
-            )
-        )
-    return _dedupe_scopes(scopes)
-
-
-def _select_section_scopes(
-    vectorstore,
-    query: str,
-    k: int,
-    intent: str,
-    paper_scopes: list[RetrievalScope],
-) -> list[RetrievalScope]:
-    section_store = getattr(vectorstore, "section_vectorstore", None)
-    if section_store is None:
-        return []
-
-    paper_sources = [scope.source for scope in paper_scopes]
-    paper_source_set = set(paper_sources)
-    paper_scores = {scope.source: scope.score for scope in paper_scopes}
-    section_k = _section_candidate_count(k, intent, len(paper_sources))
-    section_hits = section_store.similarity_search_with_score(
-        query,
-        k=section_k,
-        filter=lambda metadata: str(metadata.get("source", "unknown")) in paper_source_set,
-        fetch_k=_vectorstore_size(section_store),
-    )
-
-    scopes: list[RetrievalScope] = []
-    for rank, (doc, _distance) in enumerate(section_hits, start=1):
-        metadata = doc.metadata
-        source = str(metadata.get("source", "unknown"))
-        chunk_start = _int_metadata(metadata.get("chunk_start"))
-        chunk_end = _int_metadata(metadata.get("chunk_end"))
-        if chunk_start is None or chunk_end is None:
-            continue
-
-        section_type = str(metadata.get("section_type", "")).lower()
-        score = (
-            _rank_score(rank)
-            + min(paper_scores.get(source, 0.0), 1.0) * 0.45
-            + _section_type_bonus(intent, section_type)
-        )
-        scopes.append(
-            RetrievalScope(
-                level="section",
-                source=source,
-                score=score,
-                node_id=str(metadata.get("section_id", "")),
-                title=str(metadata.get("section_title", "")),
-                section_type=section_type,
-                chunk_start=chunk_start,
-                chunk_end=chunk_end,
-            )
-        )
-    return _dedupe_scopes(scopes)
-
-
-def _paper_scopes_to_chunk_scopes(
-    documents: list[Document],
-    paper_scopes: list[RetrievalScope],
-) -> list[RetrievalScope]:
-    source_scores = {scope.source: scope.score for scope in paper_scopes}
-    chunk_ranges: dict[str, list[int]] = defaultdict(list)
-    for doc in documents:
-        source = str(doc.metadata.get("source", "unknown"))
-        if source not in source_scores:
-            continue
-        chunk_id = _int_metadata(doc.metadata.get("chunk_id"))
-        if chunk_id is not None:
-            chunk_ranges[source].append(chunk_id)
-
-    scopes: list[RetrievalScope] = []
-    for source, chunk_ids in chunk_ranges.items():
-        scopes.append(
-            RetrievalScope(
-                level="paper",
-                source=source,
-                score=source_scores[source],
-                node_id=source,
-                chunk_start=min(chunk_ids),
-                chunk_end=max(chunk_ids),
-            )
-        )
-    return scopes
-
-
-def _rerank_hierarchical_candidates(
-    results: list[tuple[Document, float]],
-    query: str,
-    intent: str,
-    source_scores: dict[str, float],
-    section_scopes: list[RetrievalScope],
-    include_references: bool,
-) -> list[tuple[Document, float]]:
-    entries = []
-    for rank, (doc, base_score) in enumerate(results, start=1):
-        section_type = infer_section_type(doc)
-        metadata = dict(doc.metadata)
-        metadata["section_type"] = section_type
-        reranked_doc = Document(page_content=doc.page_content, metadata=metadata)
-        score = _hierarchical_score(
-            doc=reranked_doc,
-            query=query,
-            intent=intent,
-            base_score=base_score,
-            source_scores=source_scores,
-            section_scopes=section_scopes,
-            rank=rank,
-            include_references=include_references,
-        )
-        entries.append((reranked_doc, score))
-
-    entries.sort(key=lambda item: item[1], reverse=True)
-    return _dedupe_scored_documents(entries)
-
-
-def _scope_metadata_filter(scopes: list[RetrievalScope]):
-    return lambda metadata: _metadata_in_scopes(metadata, scopes)
-
-
-def _metadata_in_scopes(metadata: dict, scopes: list[RetrievalScope]) -> bool:
-    source = str(metadata.get("source", "unknown"))
-    chunk_id = _int_metadata(metadata.get("chunk_id"))
-    if chunk_id is None:
-        return False
-    for scope in scopes:
-        if scope.source != source:
-            continue
-        if scope.chunk_start is None or scope.chunk_end is None:
-            return True
-        if scope.chunk_start <= chunk_id <= scope.chunk_end:
-            return True
-    return False
-
-
-def _source_scores_from_scopes(scopes: list[RetrievalScope]) -> dict[str, float]:
-    scores: dict[str, float] = defaultdict(float)
-    for scope in scopes:
-        layer_weight = 1.0 if scope.level == "paper" else 0.85
-        scores[scope.source] += max(scope.score, 0.0) * layer_weight
-    if not scores:
-        return {}
-    max_score = max(scores.values()) or 1.0
-    return {source: score / max_score for source, score in scores.items()}
-
-
-def _paper_candidate_count(k: int, intent: str) -> int:
-    if intent == "comparison":
-        return max(TOP_DOWN_DEFAULT_PAPER_K + 2, min(k, 8))
-    if intent in {"summary", "workflow"}:
-        return TOP_DOWN_DEFAULT_PAPER_K
-    return min(TOP_DOWN_DEFAULT_PAPER_K, max(3, k // 2))
-
-
-def _section_candidate_count(k: int, intent: str, paper_count: int) -> int:
-    base = max(TOP_DOWN_DEFAULT_SECTION_K, k * 2, paper_count * 3)
-    if intent in {"summary", "workflow", "comparison"}:
-        return max(base, k * 3)
-    return base
-
-
-def _section_type_bonus(intent: str, section_type: str) -> float:
-    return SECTION_TYPE_WEIGHTS.get(intent, {}).get(section_type, 0.0) * 4.0
-
-
-def _rank_score(rank: int) -> float:
-    return 1.0 / (rank + 1)
-
-
-def _dedupe_scopes(scopes: list[RetrievalScope]) -> list[RetrievalScope]:
-    best: dict[tuple[str, str, int | None, int | None], RetrievalScope] = {}
-    for scope in scopes:
-        key = (scope.level, scope.source, scope.chunk_start, scope.chunk_end)
-        existing = best.get(key)
-        if existing is None or scope.score > existing.score:
-            best[key] = scope
-    return sorted(best.values(), key=lambda scope: scope.score, reverse=True)
-
-
-def _select_hierarchical_results(
-    results: list[tuple[Document, float]],
-    query: str,
-    k: int,
-    include_references: bool,
-    vectorstore,
-) -> list[tuple[Document, float]]:
-    intent = infer_query_intent(query)
-    documents = _iter_vectorstore_documents(vectorstore)
-    index_source_scores, section_scopes = _multi_index_scores(vectorstore, query=query, k=max(k, 8))
-    source_scores = _paper_source_scores(
-        documents=documents,
-        initial_results=results,
-        query=query,
-        extra_scores=index_source_scores,
-    )
-    expanded_results = _expand_with_adjacent_chunks(
-        vectorstore=vectorstore,
-        results=results,
-        intent=intent,
-        include_references=include_references,
-    )
-    entries = _rerank_hierarchical_candidates(
-        results=expanded_results,
-        query=query,
-        intent=intent,
-        source_scores=source_scores,
-        section_scopes=section_scopes,
-        include_references=include_references,
-    )
-    if _needs_source_coverage(query, intent):
-        return _balanced_source_select(entries, k=k)
-    return entries[:k]
-
-
-def infer_query_intent(query: str) -> str:
-    normalized = normalize_text(query).lower()
-    if any(term in normalized for term in ["引用", "参考文献", "related work", "references", "cite", "cited"]):
-        return "citation"
-    if _has_workflow_intent(normalized):
-        return "workflow"
-    if any(
-        term in normalized
-        for term in [
-            "比较",
-            "对比",
-            "区别",
-            "差别",
-            "优缺点",
-            "哪些",
-            "共同",
-            "路线",
-            "vs",
-            "compare",
-            "comparison",
-            "different",
-        ]
-    ):
-        return "comparison"
-    if any(
-        term in normalized
-        for term in ["是哪篇", "指的是", "是什么", "定义", "what is", "which paper", "stands for"]
-    ):
-        return "definition"
-    if _has_summary_intent(normalized) or any(
-        term in normalized for term in ["贡献", "局限", "框架", "总结", "概述", "contribution", "limitation"]
-    ):
-        return "summary"
-    return "specific"
-
-
-def infer_section_type(doc: Document) -> str:
-    metadata = doc.metadata
-    explicit = str(metadata.get("section_type", "")).strip().lower()
-    if explicit:
-        return explicit
-
-    text = normalize_text(doc.page_content).lower()
-    head = text[:700]
-    page = _int_metadata(metadata.get("page"))
-    chunk_id = _int_metadata(metadata.get("chunk_id"))
-
-    if is_reference_like(doc.page_content):
-        return "references"
-    if re.search(r"\babstract\b", head) or (page == 1 and chunk_id is not None and chunk_id <= 2):
-        return "abstract"
-    if re.search(r"\b(related work|background|literature review)\b", head):
-        return "related"
-    if re.search(r"\b(conclusion|future work|limitations?|discussion)\b", head):
-        return "conclusion"
-    if re.search(r"\b(experiments?|evaluation|results?|ablation|datasets?)\b", head):
-        return "experiment"
-    if re.search(
-        r"\b(proposed|methodology|methods?|framework|algorithm|model|architecture|approach|implementation)\b",
-        head,
-    ):
-        return "method"
-    return "body"
-
-
-def _hierarchical_score(
-    doc: Document,
-    query: str,
-    intent: str,
-    base_score: float,
-    source_scores: dict[str, float],
-    section_scopes: list[RetrievalScope],
-    rank: int,
-    include_references: bool,
-) -> float:
-    metadata = doc.metadata
-    source = str(metadata.get("source", ""))
-    section_type = str(metadata.get("section_type", "body"))
-    score = float(base_score)
-
-    # The first-stage RRF score is small (~0.03), so these boosts are
-    # intentionally modest and capped.
-    score += min(source_scores.get(source, 0.0), 1.0) * 0.030
-    score += _section_range_boost(doc, section_scopes)
-    score += SECTION_TYPE_WEIGHTS.get(intent, {}).get(section_type, 0.0)
-    score += _raw_term_hit_boost(query, doc)
-    score += 0.004 / max(rank, 1)
-
-    if section_type == "references" and not include_references:
-        score -= 0.035
-    return score
-
-
-def _paper_source_scores(
-    documents: list[Document],
-    initial_results: list[tuple[Document, float]],
-    query: str,
-    extra_scores: dict[str, float] | None = None,
-) -> dict[str, float]:
-    anchors, _weighted_terms = _keyword_terms(query)
-    raw_terms = _raw_query_terms(query)
-    source_docs: dict[str, list[Document]] = defaultdict(list)
-    for doc in documents:
-        source_docs[str(doc.metadata.get("source", "unknown"))].append(doc)
-
-    scores: dict[str, float] = defaultdict(float)
-    for rank, (doc, _score) in enumerate(initial_results, start=1):
-        source = str(doc.metadata.get("source", "unknown"))
-        scores[source] += 1.0 / (rank + 2)
-
-    for source, score in (extra_scores or {}).items():
-        scores[source] += score
-
-    for source, docs in source_docs.items():
-        ordered = sorted(docs, key=lambda doc: _int_metadata(doc.metadata.get("chunk_id")) or 0)
-        early_text = normalize_text(" ".join(doc.page_content for doc in ordered[:6])).lower()
-        source_text = normalize_text(source).lower()
-        score = 0.0
-        for term in anchors:
-            if term in source_text:
-                score += 1.2
-            if term in early_text:
-                score += min(0.6, 0.18 * _term_count(early_text, term))
-        for term in raw_terms:
-            if term in source:
-                score += 1.0
-            if term in " ".join(doc.page_content for doc in ordered[:4]):
-                score += 0.5
-        scores[source] += score
-
-    if not scores:
-        return {}
-    max_score = max(scores.values()) or 1.0
-    return {source: score / max_score for source, score in scores.items()}
-
-
-def _multi_index_scores(vectorstore, query: str, k: int) -> tuple[dict[str, float], list[RetrievalScope]]:
-    source_scores: dict[str, float] = defaultdict(float)
-    section_scopes: list[RetrievalScope] = []
-
-    paper_store = getattr(vectorstore, "paper_vectorstore", None)
-    if paper_store is not None:
-        for rank, (doc, _distance) in enumerate(paper_store.similarity_search_with_score(query, k=k), start=1):
-            source = str(doc.metadata.get("source", "unknown"))
-            source_scores[source] += 1.4 / (rank + 1)
-
-    section_store = getattr(vectorstore, "section_vectorstore", None)
-    if section_store is not None:
-        for rank, (doc, _distance) in enumerate(section_store.similarity_search_with_score(query, k=k * 2), start=1):
-            metadata = doc.metadata
-            source = str(metadata.get("source", "unknown"))
-            weight = 1.0 / (rank + 1)
-            chunk_start = _int_metadata(metadata.get("chunk_start"))
-            chunk_end = _int_metadata(metadata.get("chunk_end"))
-            source_scores[source] += 0.9 * weight
-            if chunk_start is None or chunk_end is None:
-                continue
-            section_scopes.append(
-                RetrievalScope(
-                    level="section",
-                    source=source,
-                    score=weight,
-                    node_id=str(metadata.get("section_id", "")),
-                    title=str(metadata.get("section_title", "")),
-                    section_type=str(metadata.get("section_type", "")),
-                    chunk_start=chunk_start,
-                    chunk_end=chunk_end,
-                )
-            )
-
-    return dict(source_scores), section_scopes
-
-
-def _section_range_boost(doc: Document, section_scopes: list[RetrievalScope]) -> float:
-    chunk_id = _int_metadata(doc.metadata.get("chunk_id"))
-    if chunk_id is None:
-        return 0.0
-    source = str(doc.metadata.get("source", "unknown"))
-    boost = 0.0
-    for scope in section_scopes:
-        if scope.source != source:
-            continue
-        start = scope.chunk_start
-        end = scope.chunk_end
-        if start is None or end is None or not (start <= chunk_id <= end):
-            continue
-        boost += scope.score * 0.026
-    return min(boost, 0.035)
-
-
-def _expand_with_adjacent_chunks(
-    vectorstore,
-    results: list[tuple[Document, float]],
-    intent: str,
-    include_references: bool,
-    metadata_filter=None,
-) -> list[tuple[Document, float]]:
-    if intent not in {"summary", "workflow", "comparison", "definition"}:
-        return results
-
-    by_source_chunk: dict[tuple[str, int], Document] = {}
-    for doc in _iter_vectorstore_documents(vectorstore):
-        source = str(doc.metadata.get("source", "unknown"))
-        chunk_id = _int_metadata(doc.metadata.get("chunk_id"))
-        if chunk_id is None:
-            continue
-        by_source_chunk[(source, chunk_id)] = doc
-
-    expanded: list[tuple[Document, float]] = list(results)
-    seen_keys = {_document_key(doc) for doc, _score in expanded}
-    offsets = (-2, -1, 1, 2) if intent == "workflow" else (-1, 1)
-    for doc, score in results[:12]:
-        source = str(doc.metadata.get("source", "unknown"))
-        chunk_id = _int_metadata(doc.metadata.get("chunk_id"))
-        if chunk_id is None:
-            continue
-        for offset in offsets:
-            neighbor = by_source_chunk.get((source, chunk_id + offset))
-            if neighbor is None:
-                continue
-            if metadata_filter is not None and not metadata_filter(neighbor.metadata):
-                continue
-            if not include_references and is_reference_like(neighbor.page_content):
-                continue
-            key = _document_key(neighbor)
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            expanded.append((neighbor, score * 0.72))
-    return expanded
-
-
-def _balanced_source_select(entries: list[tuple[Document, float]], k: int) -> list[tuple[Document, float]]:
-    if k <= 3:
-        return entries[:k]
-
-    selected: list[tuple[Document, float]] = []
-    selected_keys: set[tuple[str, str, str, str]] = set()
-    counts: dict[str, int] = defaultdict(int)
-    candidate_sources = _top_sources(entries, max_sources=min(5, k))
-    if len(candidate_sources) <= 1:
-        return entries[:k]
-
-    max_per_source_first_pass = max(1, k // len(candidate_sources))
-    for doc, score in entries:
-        source = str(doc.metadata.get("source", "unknown"))
-        if source not in candidate_sources:
-            continue
-        if counts[source] >= max_per_source_first_pass:
-            continue
-        key = _document_key(doc)
-        if key in selected_keys:
-            continue
-        selected.append((doc, score))
-        selected_keys.add(key)
-        counts[source] += 1
-        if len(selected) >= k:
-            return selected
-
-    for doc, score in entries:
-        key = _document_key(doc)
-        if key in selected_keys:
-            continue
-        selected.append((doc, score))
-        selected_keys.add(key)
-        if len(selected) >= k:
-            return selected
-    return selected
-
-
-def _top_sources(entries: list[tuple[Document, float]], max_sources: int) -> set[str]:
-    scores: dict[str, float] = defaultdict(float)
-    for rank, (doc, score) in enumerate(entries[: max_sources * 6], start=1):
-        source = str(doc.metadata.get("source", "unknown"))
-        scores[source] += score + 0.01 / rank
-    return {source for source, _score in sorted(scores.items(), key=lambda item: item[1], reverse=True)[:max_sources]}
-
-
-def _needs_source_coverage(query: str, intent: str) -> bool:
-    normalized = normalize_text(query).lower()
-    return intent == "comparison" or any(
-        term in normalized
-        for term in ["哪些", "共同", "这几篇", "这些论文", "列表", "分别", "compare", "comparison", "which methods"]
-    )
-
-
-def _raw_term_hit_boost(query: str, doc: Document) -> float:
-    raw_terms = _raw_query_terms(query)
-    if not raw_terms:
-        return 0.0
-    text = doc.page_content
-    source = str(doc.metadata.get("source", ""))
-    boost = 0.0
-    for term in raw_terms:
-        if term in source:
-            boost += 0.012
-        if term in text:
-            boost += 0.008
-    return min(boost, 0.026)
-
-
-def _raw_query_terms(query: str) -> list[str]:
-    terms = []
-    for term in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", query):
-        if term.lower() in QUERY_STOPWORDS:
-            continue
-        terms.append(term)
-    return _dedupe(terms)
-
-
-def _dedupe_scored_documents(items: list[tuple[Document, float]]) -> list[tuple[Document, float]]:
-    seen: set[tuple[str, str, str, str]] = set()
-    deduped: list[tuple[Document, float]] = []
-    for doc, score in items:
-        key = _document_key(doc)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append((doc, score))
-    return deduped
-
-
-def _int_metadata(value) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def is_reference_like(text: str) -> bool:
-    # 这是一个轻量规则：如果 chunk 里年份、会议/期刊、pp. 等引用特征很多，
-    # 就把它当作 References/参考文献片段处理。
     normalized = normalize_text(text).lower()
     head = normalized[:500]
     citation_years = len(re.findall(r"\b(?:19|20)\d{2}\b", normalized))
@@ -951,6 +233,18 @@ def is_reference_like(text: str) -> bool:
 def normalize_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def clean_model_output(text: str) -> str:
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    return text.strip()
+
+
+def ensure_answer_citations(answer: str, source_rows: list[dict[str, str]]) -> str:
+    if re.search(r"\[S\d+\]", answer) or not source_rows:
+        return answer
+    source_ids = " ".join(f"[{row['id']}]" for row in source_rows)
+    return f"{answer}\n\n主要依据：{source_ids}"
 
 
 def _hybrid_rrf_score(entry: dict) -> float:
@@ -1008,14 +302,7 @@ def _has_summary_intent(normalized_query: str) -> bool:
 
 
 def _has_workflow_intent(normalized_query: str) -> bool:
-    return any(
-        term in normalized_query
-        for term in ["流程", "步骤", "过程", "workflow", "process", "procedure", "step"]
-    )
-
-
-def _vectorstore_size(vectorstore) -> int:
-    return len(_iter_vectorstore_documents(vectorstore))
+    return any(term in normalized_query for term in ["流程", "步骤", "过程", "workflow", "process", "procedure", "step"])
 
 
 def _iter_vectorstore_documents(vectorstore) -> list[Document]:
@@ -1055,17 +342,3 @@ def _dedupe(items: list[str]) -> list[str]:
         seen.add(item)
         deduped.append(item)
     return deduped
-
-
-def clean_model_output(text: str) -> str:
-    # 本地推理模型有时会输出 <think>...</think>，这里删掉推理过程，只保留回答。
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    return text.strip()
-
-
-def ensure_answer_citations(answer: str, source_rows: list[dict[str, str]]) -> str:
-    # 小模型有时不严格按提示写 [S1] 引用；这里做一个简单兜底。
-    if re.search(r"\[S\d+\]", answer) or not source_rows:
-        return answer
-    source_ids = " ".join(f"[{row['id']}]" for row in source_rows)
-    return f"{answer}\n\n主要依据：{source_ids}"

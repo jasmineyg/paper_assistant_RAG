@@ -22,8 +22,8 @@ from paper_assistant_rag.models import build_llm
 from paper_assistant_rag.retrieval import (
     clean_model_output,
     ensure_answer_citations,
-    hierarchical_search_with_score,
     normalize_text,
+    retrieve_chunks_with_score,
 )
 from paper_assistant_rag.settings import Settings
 from paper_assistant_rag.ui import console, print_answer, print_sources, safe_for_console
@@ -183,7 +183,7 @@ def build_hybrid_retriever(vectorstore, k: int, include_references: bool):
         print_retrieval_query(query)
         # 先多取一些候选，再做参考文献过滤，避免最相关的正文片段被挤掉。
         try:
-            selected_results = hierarchical_search_with_score(
+            selected_results = retrieve_chunks_with_score(
                 vectorstore,
                 query=query,
                 k=k,
