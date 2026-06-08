@@ -8,10 +8,12 @@ from typing import Annotated
 import typer
 from rich.table import Table
 
+from paper_assistant_rag.communities import build_community_index
 from paper_assistant_rag.evaluation import run_evaluation
 from paper_assistant_rag.indexing import append_to_index, build_index
 from paper_assistant_rag.kg import build_kg_cache
 from paper_assistant_rag.paths import (
+    DEFAULT_COMMUNITY_INDEX_DIR,
     DEFAULT_EVAL_DATASET,
     DEFAULT_EVAL_RUN_DIR,
     DEFAULT_GRAPH_DIR,
@@ -100,12 +102,61 @@ def kg_build_command(
     )
 
 
+@app.command(name="community-build")
+def community_build_command(
+    graph_dir: Annotated[Path, typer.Option(help="Directory containing KG cache files.")] = DEFAULT_GRAPH_DIR,
+    community_index_dir: Annotated[
+        Path,
+        typer.Option(help="Directory used to save the community FAISS index."),
+    ] = DEFAULT_COMMUNITY_INDEX_DIR,
+    algorithm: Annotated[
+        str,
+        typer.Option(help="Community detection algorithm: louvain, greedy, or label."),
+    ] = "louvain",
+    resolution: Annotated[
+        float,
+        typer.Option(help="Louvain resolution. Larger values produce more communities."),
+    ] = 1.0,
+    max_summary_entities: Annotated[
+        int,
+        typer.Option(help="Maximum key entities kept in each community summary."),
+    ] = 24,
+    max_summary_relations: Annotated[
+        int,
+        typer.Option(help="Maximum key relations kept in each community summary."),
+    ] = 24,
+    llm_summaries: Annotated[
+        bool,
+        typer.Option("--llm-summaries", help="Use the chat LLM to refine deterministic community summaries."),
+    ] = False,
+    summary_concurrency: Annotated[
+        int,
+        typer.Option("--summary-concurrency", min=1, help="Number of community summaries to refine concurrently."),
+    ] = 1,
+) -> None:
+    """Build single-level KG communities and a community-summary FAISS index."""
+    build_community_index(
+        graph_dir=graph_dir,
+        community_index_dir=community_index_dir,
+        algorithm=algorithm,
+        resolution=resolution,
+        max_summary_entities=max_summary_entities,
+        max_summary_relations=max_summary_relations,
+        llm_summaries=llm_summaries,
+        summary_concurrency=summary_concurrency,
+    )
+
+
 @app.command(name="ask")
 def ask_command(
     question: Annotated[str, typer.Argument(help="Question to answer from the paper knowledge base.")],
     paper_dir: Annotated[Path, typer.Option(help="Directory containing PDF papers.")] = DEFAULT_PAPER_DIR,
     index_dir: Annotated[Path, typer.Option(help="Directory used to load/save the FAISS index.")] = DEFAULT_INDEX_DIR,
     graph_dir: Annotated[Path, typer.Option(help="Directory containing KG cache files for graph retrieval.")] = DEFAULT_GRAPH_DIR,
+    community_index_dir: Annotated[
+        Path,
+        typer.Option(help="Directory containing community summary FAISS index for archrag retrieval."),
+    ] = DEFAULT_COMMUNITY_INDEX_DIR,
     memory_db: Annotated[Path, typer.Option(help="SQLite database used to persist chat memory.")] = DEFAULT_MEMORY_DB,
     session: Annotated[str, typer.Option(help="Conversation session id used for chat memory.")] = "default",
     reset_memory: Annotated[
@@ -124,8 +175,19 @@ def ask_command(
     ] = False,
     retrieval_mode: Annotated[
         str,
-        typer.Option("--retrieval-mode", help="Retrieval mode: hybrid or graph."),
+        typer.Option("--retrieval-mode", help="Retrieval mode: hybrid, graph, or archrag."),
     ] = "hybrid",
+    community_k: Annotated[
+        int,
+        typer.Option("--community-k", min=0, help="Number of community summaries to retrieve in archrag mode."),
+    ] = 3,
+    adaptive_filter: Annotated[
+        bool,
+        typer.Option(
+            "--adaptive-filter/--no-adaptive-filter",
+            help="Use the chat LLM to score and filter evidence before final answering in archrag mode.",
+        ),
+    ] = True,
 ) -> None:
     """Ask with persistent chat memory and return an answer with source snippets."""
     ask_question(
@@ -140,6 +202,9 @@ def ask_command(
         show_snippets=show_snippets,
         include_references=include_references,
         graph_dir=graph_dir,
+        community_index_dir=community_index_dir,
+        community_k=community_k,
+        adaptive_filter=adaptive_filter,
         retrieval_mode=retrieval_mode,
     )
 
@@ -166,6 +231,10 @@ def eval_command(
         Path,
         typer.Option(help="Directory containing KG cache files for graph retrieval."),
     ] = DEFAULT_GRAPH_DIR,
+    community_index_dir: Annotated[
+        Path,
+        typer.Option(help="Directory containing community summary FAISS index for archrag retrieval."),
+    ] = DEFAULT_COMMUNITY_INDEX_DIR,
     k: Annotated[int, typer.Option(help="Number of source chunks to retrieve per item.")] = 10,
     limit: Annotated[
         int | None,
@@ -192,8 +261,19 @@ def eval_command(
     ] = "eval",
     retrieval_mode: Annotated[
         str,
-        typer.Option("--retrieval-mode", help="Retrieval mode: hybrid or graph."),
+        typer.Option("--retrieval-mode", help="Retrieval mode: hybrid, graph, or archrag."),
     ] = "hybrid",
+    community_k: Annotated[
+        int,
+        typer.Option("--community-k", min=0, help="Number of community summaries to retrieve in archrag mode."),
+    ] = 3,
+    adaptive_filter: Annotated[
+        bool,
+        typer.Option(
+            "--adaptive-filter/--no-adaptive-filter",
+            help="Use the chat LLM to score and filter evidence before final answering in archrag mode.",
+        ),
+    ] = True,
     concurrency: Annotated[
         int,
         typer.Option(
@@ -210,12 +290,15 @@ def eval_command(
         memory_db=memory_db,
         output_dir=output_dir,
         graph_dir=graph_dir,
+        community_index_dir=community_index_dir,
         k=k,
         limit=limit,
         query_field=query_field,
         include_references=include_references,
         with_answers=with_answers,
         session_prefix=session_prefix,
+        community_k=community_k,
+        adaptive_filter=adaptive_filter,
         retrieval_mode=retrieval_mode,
         concurrency=concurrency,
     )

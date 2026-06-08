@@ -16,6 +16,10 @@ from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from openai import OpenAIError
 
+from paper_assistant_rag.community_retrieval import (
+    adaptive_filter_documents,
+    retrieve_community_augmented_chunks_with_score,
+)
 from paper_assistant_rag.graph_retrieval import retrieve_graph_chunks_with_score
 from paper_assistant_rag.indexing import build_index, index_exists, load_index
 from paper_assistant_rag.memory import clear_session_history, get_session_history
@@ -91,6 +95,9 @@ def ask_question(
     show_snippets: bool,
     include_references: bool,
     graph_dir: Path,
+    community_index_dir: Path,
+    community_k: int,
+    adaptive_filter: bool,
     retrieval_mode: str,
 ) -> None:
     settings = Settings.from_env()
@@ -119,6 +126,9 @@ def ask_question(
         k=k,
         include_references=include_references,
         graph_dir=graph_dir,
+        community_index_dir=community_index_dir,
+        community_k=community_k,
+        adaptive_filter=adaptive_filter,
         retrieval_mode=retrieval_mode,
     )
     try:
@@ -150,6 +160,9 @@ def build_conversational_rag_chain(
     k: int,
     include_references: bool,
     graph_dir: Path | None = None,
+    community_index_dir: Path | None = None,
+    community_k: int = 3,
+    adaptive_filter: bool = True,
     retrieval_mode: str = "hybrid",
 ):
     llm = build_llm(settings)
@@ -158,7 +171,11 @@ def build_conversational_rag_chain(
         k=k,
         include_references=include_references,
         graph_dir=graph_dir,
+        community_index_dir=community_index_dir,
+        community_k=community_k,
+        adaptive_filter=adaptive_filter,
         retrieval_mode=retrieval_mode,
+        llm=llm,
     )
     history_aware_retriever = create_history_aware_retriever(
         llm=llm,
@@ -196,7 +213,11 @@ def build_hybrid_retriever(
     k: int,
     include_references: bool,
     graph_dir: Path | None = None,
+    community_index_dir: Path | None = None,
+    community_k: int = 3,
+    adaptive_filter: bool = True,
     retrieval_mode: str = "hybrid",
+    llm=None,
 ):
     mode = normalize_retrieval_mode(retrieval_mode)
 
@@ -214,6 +235,19 @@ def build_hybrid_retriever(
                     include_references=include_references,
                     graph_dir=graph_dir,
                 )
+            elif mode == "archrag":
+                if graph_dir is None or community_index_dir is None:
+                    raise RetrievalServiceError("archrag retrieval requires graph_dir and community_index_dir")
+                selected_results = retrieve_community_augmented_chunks_with_score(
+                    vectorstore=vectorstore,
+                    query=query,
+                    k=k,
+                    include_references=include_references,
+                    graph_dir=graph_dir,
+                    community_index_dir=community_index_dir,
+                    community_k=community_k,
+                    include_community_docs=True,
+                )
             else:
                 selected_results = retrieve_chunks_with_score(
                     vectorstore,
@@ -223,7 +257,15 @@ def build_hybrid_retriever(
                 )
         except (OpenAIError, HTTPError) as error:
             raise RetrievalServiceError(str(error)) from error
-        return documents_with_source_metadata(selected_results)
+        documents = documents_with_source_metadata(selected_results)
+        if mode == "archrag" and adaptive_filter and llm is not None:
+            return adaptive_filter_documents(
+                llm=llm,
+                query=query,
+                docs=documents,
+                max_documents=max(k, 1),
+            )
+        return documents
 
     return RunnableLambda(retrieve)
 
@@ -237,9 +279,13 @@ def normalize_retrieval_mode(retrieval_mode: str) -> str:
         "graph": "graph",
         "kg": "graph",
         "graph-assisted": "graph",
+        "community": "archrag",
+        "communities": "archrag",
+        "archrag": "archrag",
+        "archrag-lite": "archrag",
     }
     if mode not in aliases:
-        raise typer.BadParameter("retrieval-mode must be one of: hybrid, graph")
+        raise typer.BadParameter("retrieval-mode must be one of: hybrid, graph, archrag")
     return aliases[mode]
 
 

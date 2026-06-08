@@ -14,6 +14,7 @@ from httpx import HTTPError
 from openai import OpenAIError
 from rich.table import Table
 
+from paper_assistant_rag.community_retrieval import retrieve_community_augmented_chunks_with_score
 from paper_assistant_rag.graph_retrieval import retrieve_graph_chunks_with_score
 from paper_assistant_rag.indexing import load_index
 from paper_assistant_rag.memory import clear_session_history
@@ -38,12 +39,15 @@ def run_evaluation(
     memory_db: Path,
     output_dir: Path,
     graph_dir: Path,
+    community_index_dir: Path,
     k: int,
     limit: int | None,
     query_field: str,
     include_references: bool,
     with_answers: bool,
     session_prefix: str,
+    community_k: int = 3,
+    adaptive_filter: bool = True,
     retrieval_mode: str = "hybrid",
     concurrency: int = 1,
 ) -> None:
@@ -68,6 +72,9 @@ def run_evaluation(
             k=k,
             include_references=include_references,
             graph_dir=graph_dir,
+            community_index_dir=community_index_dir,
+            community_k=community_k,
+            adaptive_filter=adaptive_filter,
             retrieval_mode=mode,
         )
 
@@ -87,6 +94,8 @@ def run_evaluation(
         k=k,
         include_references=include_references,
         graph_dir=graph_dir,
+        community_index_dir=community_index_dir,
+        community_k=community_k,
         retrieval_mode=mode,
         concurrency=concurrency,
     )
@@ -105,8 +114,11 @@ def run_evaluation(
         "dataset_path": str(dataset_path),
         "index_dir": str(index_dir),
         "graph_dir": str(graph_dir),
+        "community_index_dir": str(community_index_dir),
         "query_field": query_field,
         "k": k,
+        "community_k": community_k,
+        "adaptive_filter": adaptive_filter,
         "include_references": include_references,
         "with_answers": with_answers,
         "retrieval_mode": mode,
@@ -132,6 +144,8 @@ def _evaluate_items(
     k: int,
     include_references: bool,
     graph_dir: Path,
+    community_index_dir: Path,
+    community_k: int,
     retrieval_mode: str,
     concurrency: int,
 ) -> list[dict[str, Any]]:
@@ -150,6 +164,8 @@ def _evaluate_items(
             k=k,
             include_references=include_references,
             graph_dir=graph_dir,
+            community_index_dir=community_index_dir,
+            community_k=community_k,
             retrieval_mode=retrieval_mode,
         )
 
@@ -181,6 +197,8 @@ def _evaluate_items(
                     k,
                     include_references,
                     graph_dir,
+                    community_index_dir,
+                    community_k,
                     retrieval_mode,
                 ): (item_index, item, query)
                 for item_index, item, query in single_turn_jobs
@@ -208,6 +226,8 @@ def _evaluate_items(
             k=k,
             include_references=include_references,
             graph_dir=graph_dir,
+            community_index_dir=community_index_dir,
+            community_k=community_k,
             retrieval_mode=retrieval_mode,
         )
 
@@ -225,6 +245,8 @@ def _evaluate_items_sequentially(
     k: int,
     include_references: bool,
     graph_dir: Path,
+    community_index_dir: Path,
+    community_k: int,
     retrieval_mode: str,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -242,6 +264,8 @@ def _evaluate_items_sequentially(
                 k=k,
                 include_references=include_references,
                 graph_dir=graph_dir,
+                community_index_dir=community_index_dir,
+                community_k=community_k,
                 retrieval_mode=retrieval_mode,
             )
         else:
@@ -258,6 +282,8 @@ def _evaluate_items_sequentially(
                 k=k,
                 include_references=include_references,
                 graph_dir=graph_dir,
+                community_index_dir=community_index_dir,
+                community_k=community_k,
                 retrieval_mode=retrieval_mode,
             )
         rows.append(row)
@@ -294,6 +320,8 @@ def _evaluate_single_turn_item(
     k: int,
     include_references: bool,
     graph_dir: Path,
+    community_index_dir: Path,
+    community_k: int,
     retrieval_mode: str,
     reset_answer_memory: bool = True,
 ) -> dict[str, Any]:
@@ -303,6 +331,8 @@ def _evaluate_single_turn_item(
         k=k,
         include_references=include_references,
         graph_dir=graph_dir,
+        community_index_dir=community_index_dir,
+        community_k=community_k,
         retrieval_mode=retrieval_mode,
     )
     row = {
@@ -346,6 +376,8 @@ def _evaluate_multi_turn_item(
     k: int,
     include_references: bool,
     graph_dir: Path,
+    community_index_dir: Path,
+    community_k: int,
     retrieval_mode: str,
 ) -> dict[str, Any]:
     if answer_chain is not None:
@@ -368,6 +400,8 @@ def _evaluate_multi_turn_item(
                 k=k,
                 include_references=include_references,
                 graph_dir=graph_dir,
+                community_index_dir=community_index_dir,
+                community_k=community_k,
                 retrieval_mode=retrieval_mode,
                 reset_answer_memory=False,
             )
@@ -420,6 +454,8 @@ def _retrieve_rows(
     k: int,
     include_references: bool,
     graph_dir: Path,
+    community_index_dir: Path,
+    community_k: int,
     retrieval_mode: str,
 ) -> list[dict[str, Any]]:
     mode = normalize_retrieval_mode(retrieval_mode)
@@ -430,6 +466,17 @@ def _retrieve_rows(
             k=k,
             include_references=include_references,
             graph_dir=graph_dir,
+        )
+    elif mode == "archrag":
+        selected_results = retrieve_community_augmented_chunks_with_score(
+            vectorstore=vectorstore,
+            query=query,
+            k=k,
+            include_references=include_references,
+            graph_dir=graph_dir,
+            community_index_dir=community_index_dir,
+            community_k=community_k,
+            include_community_docs=False,
         )
     else:
         selected_results = retrieve_chunks_with_score(
@@ -444,6 +491,7 @@ def _retrieve_rows(
         rows.append(
             {
                 "rank": rank,
+                "document_type": str(metadata.get("document_type", "chunk")),
                 "source": str(metadata.get("source", "unknown")),
                 "page": str(metadata.get("page", "?")),
                 "chunk_id": str(metadata.get("chunk_id", "?")),
@@ -452,6 +500,8 @@ def _retrieve_rows(
                 "base_rank": str(metadata.get("base_rank", "")),
                 "graph_rank": str(metadata.get("graph_rank", "")),
                 "graph_score": str(metadata.get("graph_score", "")),
+                "community_rank": str(metadata.get("community_rank", "")),
+                "community_id": str(metadata.get("community_id", "")),
                 "snippet": normalize_text(doc.page_content)[:280],
                 "text": normalize_text(doc.page_content),
             }
@@ -695,6 +745,8 @@ def _write_markdown_report(markdown_path: Path, payload: dict[str, Any]) -> None
         f"- Query field: `{payload.get('query_field')}`",
         f"- Retrieval mode: `{payload.get('retrieval_mode')}`",
         f"- Top-k: `{payload.get('k')}`",
+        f"- Community-k: `{payload.get('community_k', '')}`",
+        f"- Adaptive filter: `{payload.get('adaptive_filter', '')}`",
         f"- Answers generated: `{payload.get('with_answers')}`",
         f"- Include references: `{payload.get('include_references')}`",
         "",
@@ -909,8 +961,8 @@ def _answer_block(row: dict[str, Any]) -> str:
 
 def _retrieved_sources_table(row: dict[str, Any]) -> list[str]:
     lines = [
-        "| Rank | Gold? | BaseRank | GraphRank | Source | Page | Chunk | Snippet |",
-        "| ---: | :---: | ---: | ---: | --- | ---: | ---: | --- |",
+        "| Rank | Gold? | BaseRank | GraphRank | Community | Source | Page | Chunk | Snippet |",
+        "| ---: | :---: | ---: | ---: | ---: | --- | ---: | ---: | --- |",
     ]
     for source in row.get("retrieved", [])[:5]:
         is_gold = _retrieved_match_label(row.get("evidence", []), source)
@@ -920,6 +972,7 @@ def _retrieved_sources_table(row: dict[str, Any]) -> list[str]:
             f"{is_gold} | "
             f"{_md_escape(str(source.get('base_rank', '')))} | "
             f"{_md_escape(str(source.get('graph_rank', '')))} | "
+            f"{_md_escape(str(source.get('community_rank', '')))} | "
             f"{_md_escape(str(source.get('source', '')))} | "
             f"{_md_escape(str(source.get('page', '')))} | "
             f"{_md_escape(str(source.get('chunk_id', '')))} | "
