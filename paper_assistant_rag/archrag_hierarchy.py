@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import networkx as nx
+import numpy as np
 
 from paper_assistant_rag.archrag_types import ArchIndex, ArchLayer, ArchNode, save_arch_index
 from paper_assistant_rag.communities import PREDICATE_WEIGHTS
@@ -29,6 +31,7 @@ def build_archrag_hierarchy_cache(
     similarity_top_k: int,
     similarity_threshold: float,
     community_algorithm: str,
+    summary_concurrency: int,
 ) -> ArchIndex:
     """Build and save hierarchical attributed communities from the KG cache."""
     settings = Settings.from_env()
@@ -49,6 +52,7 @@ def build_archrag_hierarchy_cache(
         similarity_top_k=similarity_top_k,
         similarity_threshold=similarity_threshold,
         community_algorithm=community_algorithm,
+        summary_concurrency=summary_concurrency,
     )
     hierarchy.metadata.update(
         {
@@ -62,6 +66,7 @@ def build_archrag_hierarchy_cache(
             "similarity_top_k": similarity_top_k,
             "similarity_threshold": similarity_threshold,
             "community_algorithm": community_algorithm,
+            "summary_concurrency": summary_concurrency,
         }
     )
     save_arch_index(hierarchy, archrag_dir, build_config=hierarchy.metadata)
@@ -205,6 +210,7 @@ def build_hierarchical_communities(
     similarity_top_k: int = 5,
     similarity_threshold: float = 0.65,
     community_algorithm: str = "louvain",
+    summary_concurrency: int = 12,
 ) -> ArchIndex:
     """Build level-0 entity nodes and repeated higher-level attributed communities."""
     max_levels = max(1, max_levels)
@@ -254,6 +260,7 @@ def build_hierarchical_communities(
             lower_graph=current_graph,
             llm=llm,
             embeddings=embeddings,
+            summary_concurrency=summary_concurrency,
         )
         if not new_nodes:
             break
@@ -292,9 +299,10 @@ def _community_nodes_for_level(
     lower_graph: nx.Graph,
     llm,
     embeddings,
+    summary_concurrency: int,
 ) -> dict[str, ArchNode]:
     """Create community nodes for one upper hierarchy level."""
-    nodes: dict[str, ArchNode] = {}
+    specs: list[dict[str, Any]] = []
     for index, members in enumerate(communities, start=1):
         children = sorted(member for member in members if member in child_nodes)
         if not children:
@@ -302,16 +310,51 @@ def _community_nodes_for_level(
         community_id = f"l{level}_c{index:04d}_{_hash_id('|'.join(children))[:8]}"
         member_nodes = [child_nodes[child_id] for child_id in children]
         internal_edges = _internal_edge_rows(lower_graph, children, child_nodes)
-        summary = summarize_community(member_nodes, internal_edges, llm)
+        specs.append(
+            {
+                "community_id": community_id,
+                "index": index,
+                "children": children,
+                "member_nodes": member_nodes,
+                "internal_edges": internal_edges,
+            }
+        )
+    if not specs:
+        return {}
+
+    summaries = _summarize_level_communities(
+        level=level,
+        specs=specs,
+        llm=llm,
+        summary_concurrency=summary_concurrency,
+    )
+    texts = [
+        _community_text(
+            str(spec["community_id"]),
+            spec["member_nodes"],
+            spec["internal_edges"],
+            summaries[position],
+        )
+        for position, spec in enumerate(specs)
+    ]
+    vectors = _embed_texts(
+        embeddings,
+        [summaries[position] or texts[position] for position in range(len(specs))],
+        f"Embedding level {level} community summaries",
+    )
+
+    nodes: dict[str, ArchNode] = {}
+    for spec, summary, text, vector in zip(specs, summaries, texts, vectors, strict=False):
+        member_nodes = spec["member_nodes"]
+        internal_edges = spec["internal_edges"]
+        children = spec["children"]
         source_chunks = _unique_value(item for node in member_nodes for item in node.source_chunks)
         raw_source_chunks = _unique_raw_source_chunks(member_nodes)
-        text = _community_text(community_id, member_nodes, internal_edges, summary)
-        vector = _embed_texts(embeddings, [summary or text], f"Embedding level {level} community {index}")[0]
         node = ArchNode(
-            node_id=community_id,
+            node_id=str(spec["community_id"]),
             level=level,
             node_type="community",
-            name=f"Level {level} community {index}",
+            name=f"Level {level} community {spec['index']}",
             text=text,
             summary=summary,
             embedding=vector,
@@ -328,6 +371,49 @@ def _community_nodes_for_level(
         )
         nodes[node.node_id] = node
     return nodes
+
+
+def _summarize_level_communities(
+    level: int,
+    specs: list[dict[str, Any]],
+    llm,
+    summary_concurrency: int,
+) -> list[str]:
+    """Summarize all communities in one level, optionally with concurrent LLM calls."""
+    summaries: list[str] = [""] * len(specs)
+    max_workers = max(1, summary_concurrency)
+    if max_workers == 1:
+        with create_progress() as progress:
+            task = progress.add_task(f"Summarizing level {level} communities", total=len(specs))
+            for position, spec in enumerate(specs):
+                summaries[position] = summarize_community(
+                    spec["member_nodes"],
+                    spec["internal_edges"],
+                    llm,
+                )
+                progress.advance(task)
+        return summaries
+
+    with create_progress() as progress:
+        task = progress.add_task(
+            f"Summarizing level {level} communities (concurrency={max_workers})",
+            total=len(specs),
+        )
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_position = {
+                executor.submit(
+                    summarize_community,
+                    spec["member_nodes"],
+                    spec["internal_edges"],
+                    llm,
+                ): position
+                for position, spec in enumerate(specs)
+            }
+            for future in as_completed(future_to_position):
+                position = future_to_position[future]
+                summaries[position] = future.result()
+                progress.advance(task)
+    return summaries
 
 
 def _build_upper_graph(
@@ -382,23 +468,98 @@ def _add_attribute_similarity_edges(
     similarity_threshold: float,
     attribute_weight: float,
 ) -> None:
-    """Add KNN-style attribute-similarity edges to an attributed graph."""
-    node_ids = sorted(graph.nodes)
-    for node_id in node_ids:
-        vector = graph.nodes[node_id].get("embedding", [])
-        scored: list[tuple[float, str]] = []
-        for other_id in node_ids:
-            if other_id == node_id:
-                continue
-            score = _cosine(vector, graph.nodes[other_id].get("embedding", []))
-            if score >= similarity_threshold:
-                scored.append((score, other_id))
-        scored.sort(key=lambda item: (-item[0], item[1]))
-        for score, other_id in scored[: max(0, similarity_top_k)]:
+    """Add blockwise NumPy top-k attribute-similarity edges to an attributed graph."""
+    if similarity_top_k <= 0 or graph.number_of_nodes() <= 1:
+        return
+
+    node_ids, vectors = _normalized_embedding_matrix(graph)
+    if len(node_ids) <= 1:
+        return
+
+    top_k = min(similarity_top_k, len(node_ids) - 1)
+    block_size = _similarity_block_size(vectors.shape[0])
+    with create_progress() as progress:
+        task = progress.add_task("Adding attribute similarity edges", total=len(node_ids))
+        for start in range(0, len(node_ids), block_size):
+            end = min(start + block_size, len(node_ids))
+            similarity_block = vectors[start:end] @ vectors.T
+            _add_similarity_edges_from_block(
+                graph=graph,
+                node_ids=node_ids,
+                similarity_block=similarity_block,
+                block_start=start,
+                top_k=top_k,
+                similarity_threshold=similarity_threshold,
+                attribute_weight=attribute_weight,
+            )
+            progress.advance(task, advance=end - start)
+
+
+def _normalized_embedding_matrix(graph: nx.Graph) -> tuple[list[str], np.ndarray]:
+    """Return node ids and an L2-normalized float32 embedding matrix."""
+    node_ids: list[str] = []
+    rows: list[list[float]] = []
+    expected_dim: int | None = None
+    for node_id in sorted(graph.nodes):
+        raw_vector = graph.nodes[node_id].get("embedding", [])
+        if not raw_vector:
+            continue
+        vector = [float(value) for value in raw_vector]
+        if expected_dim is None:
+            expected_dim = len(vector)
+        if len(vector) != expected_dim:
+            continue
+        node_ids.append(node_id)
+        rows.append(vector)
+    if not rows:
+        return [], np.empty((0, 0), dtype=np.float32)
+
+    matrix = np.asarray(rows, dtype=np.float32)
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    valid_mask = (norms[:, 0] > 0.0) & np.isfinite(norms[:, 0])
+    if not np.all(valid_mask):
+        matrix = matrix[valid_mask]
+        node_ids = [node_id for node_id, is_valid in zip(node_ids, valid_mask.tolist(), strict=False) if is_valid]
+        norms = norms[valid_mask]
+    matrix = matrix / np.maximum(norms, 1e-12)
+    return node_ids, matrix
+
+
+def _similarity_block_size(node_count: int) -> int:
+    """Choose a bounded block size for dense similarity multiplication."""
+    if node_count >= 10000:
+        return 256
+    if node_count >= 3000:
+        return 512
+    return 1024
+
+
+def _add_similarity_edges_from_block(
+    graph: nx.Graph,
+    node_ids: list[str],
+    similarity_block: np.ndarray,
+    block_start: int,
+    top_k: int,
+    similarity_threshold: float,
+    attribute_weight: float,
+) -> None:
+    """Add top-k above-threshold edges from one similarity matrix block."""
+    for row_offset in range(similarity_block.shape[0]):
+        node_index = block_start + row_offset
+        row = similarity_block[row_offset]
+        row[node_index] = -np.inf
+        candidate_indices = np.argpartition(row, -top_k)[-top_k:]
+        ranked_indices = candidate_indices[np.argsort(row[candidate_indices])[::-1]]
+        left_id = node_ids[node_index]
+        for candidate_index in ranked_indices:
+            score = float(row[candidate_index])
+            if score < similarity_threshold:
+                break
+            right_id = node_ids[int(candidate_index)]
             _add_or_update_edge(
                 graph,
-                node_id,
-                other_id,
+                left_id,
+                right_id,
                 weight=attribute_weight * score,
                 edge_type="attribute_similarity",
                 relation={"description": f"attribute similarity {score:.4f}", "similarity": score},

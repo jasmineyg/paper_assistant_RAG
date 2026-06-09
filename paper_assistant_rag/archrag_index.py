@@ -7,7 +7,10 @@ import math
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from paper_assistant_rag.archrag_types import ArchIndex, ArchLayer, ArchNode, load_arch_index, save_arch_index
+from paper_assistant_rag.ui import create_progress
 
 
 def build_archrag_index(
@@ -69,8 +72,8 @@ def search_layer(
             heapq.heappush(candidates, (-neighbor_score, neighbor_id))
 
     if len(best_by_id) < min(top_k, len(layer.nodes)):
-        for node_id, node in layer.nodes.items():
-            best_by_id.setdefault(node_id, _score_node(node, query_embedding))
+        for node_id, score in _score_all_nodes(layer, query_embedding).items():
+            best_by_id.setdefault(node_id, score)
 
     ranked = sorted(best_by_id.items(), key=lambda item: (-item[1], item[0]))[:top_k]
     return [_node_result(layer.nodes[node_id], score) for node_id, score in ranked]
@@ -125,19 +128,94 @@ def load_archrag_index(archrag_dir: Path) -> ArchIndex:
 
 
 def _nearest_neighbor_links(layer: ArchLayer, m_neighbors: int) -> dict[str, list[str]]:
-    """Return top-m cosine neighbors for every node in one layer."""
-    links: dict[str, list[str]] = {}
-    node_ids = sorted(layer.nodes)
-    for node_id in node_ids:
-        node = layer.nodes[node_id]
-        scored = [
-            (_cosine(node.embedding, layer.nodes[other_id].embedding), other_id)
-            for other_id in node_ids
-            if other_id != node_id
-        ]
-        scored.sort(key=lambda item: (-item[0], item[1]))
-        links[node_id] = [other_id for _score, other_id in scored[: max(0, m_neighbors)]]
+    """Return top-m cosine neighbors for every node in one layer using blockwise NumPy."""
+    links: dict[str, list[str]] = {node_id: [] for node_id in layer.nodes}
+    if m_neighbors <= 0 or len(layer.nodes) <= 1:
+        return links
+
+    node_ids, vectors = _normalized_embedding_matrix(layer)
+    if len(node_ids) <= 1:
+        return links
+
+    top_k = min(m_neighbors, len(node_ids) - 1)
+    block_size = _similarity_block_size(len(node_ids))
+    with create_progress() as progress:
+        task = progress.add_task(
+            f"Building level {layer.level} intra-layer links",
+            total=len(node_ids),
+        )
+        for start in range(0, len(node_ids), block_size):
+            end = min(start + block_size, len(node_ids))
+            similarity_block = vectors[start:end] @ vectors.T
+            _fill_neighbor_links_from_block(
+                links=links,
+                node_ids=node_ids,
+                similarity_block=similarity_block,
+                block_start=start,
+                top_k=top_k,
+            )
+            progress.advance(task, advance=end - start)
     return links
+
+
+def _normalized_embedding_matrix(layer: ArchLayer) -> tuple[list[str], np.ndarray]:
+    """Return node ids and an L2-normalized float32 embedding matrix for one layer."""
+    return _normalized_nodes_matrix(layer.nodes)
+
+
+def _normalized_nodes_matrix(nodes: dict[str, ArchNode]) -> tuple[list[str], np.ndarray]:
+    """Return node ids and an L2-normalized float32 embedding matrix for node dicts."""
+    node_ids: list[str] = []
+    rows: list[list[float]] = []
+    expected_dim: int | None = None
+    for node_id in sorted(nodes):
+        vector = [float(value) for value in nodes[node_id].embedding]
+        if not vector:
+            continue
+        if expected_dim is None:
+            expected_dim = len(vector)
+        if len(vector) != expected_dim:
+            continue
+        node_ids.append(node_id)
+        rows.append(vector)
+    if not rows:
+        return [], np.empty((0, 0), dtype=np.float32)
+
+    matrix = np.asarray(rows, dtype=np.float32)
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    valid_mask = (norms[:, 0] > 0.0) & np.isfinite(norms[:, 0])
+    if not np.all(valid_mask):
+        matrix = matrix[valid_mask]
+        node_ids = [node_id for node_id, is_valid in zip(node_ids, valid_mask.tolist(), strict=False) if is_valid]
+        norms = norms[valid_mask]
+    matrix = matrix / np.maximum(norms, 1e-12)
+    return node_ids, matrix
+
+
+def _similarity_block_size(node_count: int) -> int:
+    """Choose a bounded block size for dense layer-link similarity."""
+    if node_count >= 10000:
+        return 256
+    if node_count >= 3000:
+        return 512
+    return 1024
+
+
+def _fill_neighbor_links_from_block(
+    links: dict[str, list[str]],
+    node_ids: list[str],
+    similarity_block: np.ndarray,
+    block_start: int,
+    top_k: int,
+) -> None:
+    """Fill top-k neighbor ids from one dense similarity block."""
+    for row_offset in range(similarity_block.shape[0]):
+        node_index = block_start + row_offset
+        row = similarity_block[row_offset]
+        row[node_index] = -np.inf
+        candidate_indices = np.argpartition(row, -top_k)[-top_k:]
+        ranked_indices = candidate_indices[np.argsort(row[candidate_indices])[::-1]]
+        links[node_ids[node_index]] = [node_ids[int(index)] for index in ranked_indices if np.isfinite(row[index])]
 
 
 def _inter_layer_links(index: ArchIndex) -> dict[str, str]:
@@ -146,16 +224,83 @@ def _inter_layer_links(index: ArchIndex) -> dict[str, str]:
     for level in sorted(index.layers):
         if level == 0 or level - 1 not in index.layers:
             continue
-        lower_nodes = index.layers[level - 1].nodes
-        for node in index.layers[level].nodes.values():
-            child_candidates = [child_id for child_id in node.children if child_id in lower_nodes]
-            if child_candidates:
-                links[node.node_id] = _nearest_node_id(node.embedding, {child_id: lower_nodes[child_id] for child_id in child_candidates})
-                continue
-            nearest = _nearest_node_id(node.embedding, lower_nodes)
-            if nearest:
-                links[node.node_id] = nearest
+        lower_layer = index.layers[level - 1]
+        lower_nodes = lower_layer.nodes
+        lower_node_ids, lower_vectors = _normalized_embedding_matrix(lower_layer)
+        if not lower_node_ids:
+            continue
+        lower_positions = {node_id: position for position, node_id in enumerate(lower_node_ids)}
+        upper_nodes = list(index.layers[level].nodes.values())
+        with create_progress() as progress:
+            task = progress.add_task(
+                f"Building level {level}->{level - 1} inter-layer links",
+                total=len(upper_nodes),
+            )
+            for node in upper_nodes:
+                child_positions = [
+                    lower_positions[child_id]
+                    for child_id in node.children
+                    if child_id in lower_positions
+                ]
+                if child_positions:
+                    links[node.node_id] = _nearest_from_matrix(
+                        query_vector=node.embedding,
+                        candidate_ids=lower_node_ids,
+                        candidate_vectors=lower_vectors,
+                        candidate_positions=child_positions,
+                    )
+                    progress.advance(task)
+                    continue
+                nearest = _nearest_from_matrix(
+                    query_vector=node.embedding,
+                    candidate_ids=lower_node_ids,
+                    candidate_vectors=lower_vectors,
+                    candidate_positions=None,
+                )
+                if nearest:
+                    links[node.node_id] = nearest
+                progress.advance(task)
     return links
+
+
+def _nearest_from_matrix(
+    query_vector: list[float],
+    candidate_ids: list[str],
+    candidate_vectors: np.ndarray,
+    candidate_positions: list[int] | None,
+) -> str:
+    """Find the nearest candidate using normalized matrix multiplication."""
+    query = _normalized_query_vector(query_vector, candidate_vectors.shape[1] if candidate_vectors.ndim == 2 else 0)
+    if query is None or not candidate_ids:
+        return ""
+    if candidate_positions:
+        positions = np.asarray(candidate_positions, dtype=np.int64)
+        scores = candidate_vectors[positions] @ query
+        best_position = int(positions[int(np.argmax(scores))])
+        return candidate_ids[best_position]
+    scores = candidate_vectors @ query
+    return candidate_ids[int(np.argmax(scores))]
+
+
+def _score_all_nodes(layer: ArchLayer, query_embedding: list[float]) -> dict[str, float]:
+    """Score all layer nodes against a query embedding with one vectorized pass."""
+    node_ids, vectors = _normalized_embedding_matrix(layer)
+    query = _normalized_query_vector(query_embedding, vectors.shape[1] if vectors.ndim == 2 else 0)
+    if query is None:
+        return {}
+    scores = vectors @ query
+    return {node_id: float(score) for node_id, score in zip(node_ids, scores.tolist(), strict=False)}
+
+
+def _normalized_query_vector(vector: list[float], expected_dim: int) -> np.ndarray | None:
+    """Return an L2-normalized query vector or None when dimensions are invalid."""
+    if expected_dim <= 0 or len(vector) != expected_dim:
+        return None
+    query = np.asarray([float(value) for value in vector], dtype=np.float32)
+    norm = float(np.linalg.norm(query))
+    if norm == 0.0 or not np.isfinite(norm):
+        return None
+    return query / max(norm, 1e-12)
 
 
 def _next_lower_start(index: ArchIndex, node_id: str, next_level: int) -> str | None:
@@ -171,13 +316,6 @@ def _next_lower_start(index: ArchIndex, node_id: str, next_level: int) -> str | 
             if child_id in index.layers[next_level].nodes:
                 return child_id
     return _central_node(index.layers[next_level].nodes)
-
-
-def _nearest_node_id(vector: list[float], nodes: dict[str, ArchNode]) -> str:
-    """Find the node whose embedding is closest to the given vector."""
-    if not nodes:
-        return ""
-    return sorted(nodes.values(), key=lambda node: (-_cosine(vector, node.embedding), node.node_id))[0].node_id
 
 
 def _central_node(nodes: dict[str, ArchNode]) -> str | None:

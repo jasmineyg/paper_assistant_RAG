@@ -93,7 +93,7 @@ def kg_build_command(
     concurrency: Annotated[
         int,
         typer.Option("--concurrency", min=1, help="Number of chunks to extract concurrently."),
-    ] = 1,
+    ] = 12,
 ) -> None:
     """Extract entity/relation cache files from indexed chunks."""
     build_kg_cache(
@@ -136,7 +136,7 @@ def community_build_command(
     summary_concurrency: Annotated[
         int,
         typer.Option("--summary-concurrency", min=1, help="Number of community summaries to refine concurrently."),
-    ] = 1,
+    ] = 12,
 ) -> None:
     """Build single-level KG communities and a community-summary FAISS index."""
     build_community_index(
@@ -182,6 +182,10 @@ def archrag_build_command(
         str,
         typer.Option("--community-algorithm", help="Community algorithm: louvain, greedy, or label."),
     ] = "louvain",
+    summary_concurrency: Annotated[
+        int,
+        typer.Option("--summary-concurrency", min=1, help="Concurrent LLM community summary calls during ArchRAG build."),
+    ] = 12,
 ) -> None:
     """Build hierarchical attributed communities and a C-HNSW-like ArchRAG index."""
     settings = Settings.from_env()
@@ -193,6 +197,7 @@ def archrag_build_command(
         similarity_top_k=similarity_top_k,
         similarity_threshold=similarity_threshold,
         community_algorithm=community_algorithm,
+        summary_concurrency=summary_concurrency,
     )
     arch_index = build_archrag_index(
         hierarchy=hierarchy,

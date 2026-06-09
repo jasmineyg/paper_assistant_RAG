@@ -58,7 +58,7 @@ def run_evaluation(
     max_levels: int | None = None,
     adaptive_filter: bool = True,
     retrieval_mode: str = "hybrid",
-    concurrency: int = 1,
+    concurrency: int = 12,
 ) -> None:
     dataset = _load_dataset(dataset_path)
     items = list(dataset["items"])
