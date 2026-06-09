@@ -33,6 +33,80 @@ user question + chat history
   -> SQLite chat memory
 ```
 
+### Graph-enhanced retrieval modes
+
+The project now keeps two graph-enhanced retrieval families separate:
+
+1. `community` / `archrag-lite`
+   - Single-level KG community detection.
+   - Community summary index.
+   - Community source-chunk expansion.
+   - RRF-style fusion with chunk retrieval.
+   - Useful as an engineering baseline, but not the full ArchRAG paper structure.
+
+2. `archrag`
+   - Hierarchical attributed communities.
+   - Python C-HNSW-like hierarchical index.
+   - Top-down hierarchical search from the highest community layer to level 0 entities.
+   - Adaptive filtering over each layer's retrieved nodes.
+   - Final answer merging with source chunk citations.
+   - Closer to the ArchRAG paper's structure than `archrag-lite`.
+
+Build the full hierarchy after `kg-build`:
+
+```powershell
+uv run python main.py kg-build
+uv run python main.py archrag-build --max-levels 3 --min-nodes-per-level 5 --similarity-top-k 5 --similarity-threshold 0.65 --m-neighbors 8
+```
+
+Ask with the paper-style hierarchical implementation:
+
+```powershell
+uv run python main.py ask "问题" --retrieval-mode archrag --top-k-per-level 5 --show-archrag-debug
+```
+
+Known approximations versus the original paper:
+
+- C-HNSW is a simplified Python implementation, not a high-performance C++/FAISS C-HNSW implementation.
+- Community detection uses NetworkX weighted Louvain/greedy/label propagation as a practical approximation to weighted Leiden-style clustering.
+- Embedding and LLM behavior depends on the configured providers and models.
+- Retrieval and answer quality still need validation through `eval --retrieval-mode archrag`.
+
+Intermediate files are saved under `data/index/archrag/`:
+
+- `hierarchy.json`
+- `nodes.jsonl`
+- `layers.json`
+- `intra_links.json`
+- `inter_links.json`
+- `build_config.json`
+
+### ArchRAG-gated legacy experiment
+
+当前项目不是完整复现 ArchRAG，而是新增了一个更稳的
+`archrag-gated` / community-gated 检索模式：
+
+```text
+query
+  -> detect query type
+  -> retrieve candidate papers by hybrid + graph + community
+  -> retrieve precise chunks inside candidate papers
+  -> rerank candidate chunks
+  -> final answer with original chunk citations
+```
+
+KG/community 的作用是提高 paper-level recall：它们帮助判断哪些论文值得进入候选集合，但不会默认把 community summary 或 community source chunks 直接塞进最终 answer context。进入候选论文后，系统会在这些论文内部重新做 chunk-level 精确检索和轻量 rerank，最终优先使用原文 chunk 作为 `[S1]`、`[S2]` 引用证据。这能缓解“paper hit 上升但 chunk hit 下降”的问题。
+
+示例：
+
+```powershell
+uv run python main.py kg-build
+uv run python main.py community-build
+uv run python main.py ask "问题" --retrieval-mode archrag-gated --candidate-papers 5 --per-paper-k 5
+```
+
+默认不会把 community summary 放进最终上下文。只有在高层总结/对比类问题中确实需要少量社区摘要时，才建议显式加上 `--include-community-docs`。
+
 ## 技术栈
 
 - LangChain
@@ -192,6 +266,13 @@ paper_assistant_rag/
   documents.py                  PDF 读取、metadata 生成、文本切分
   indexing.py                   FAISS 索引构建、追加、保存、加载
   retrieval.py                  混合检索、参考文献过滤、回答清理
+  graph_retrieval.py            KG 辅助 chunk 检索
+  community_retrieval.py        community summary 检索和可选证据过滤
+  archrag_gated.py              ArchRAG-lite 候选论文门控和二阶段 chunk rerank
+  archrag_types.py              ArchRAG hierarchy node/layer/index data structures
+  archrag_hierarchy.py          hierarchical attributed community construction
+  archrag_index.py              Python C-HNSW-like index and top-down search
+  archrag_generation.py         adaptive filtering and final answer merge
   memory.py                     SQLite 对话历史
   qa.py                         带记忆的 RAG 问答主流程
   ui.py                         Rich 终端输出和来源表格

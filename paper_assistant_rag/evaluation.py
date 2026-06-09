@@ -14,10 +14,14 @@ from httpx import HTTPError
 from openai import OpenAIError
 from rich.table import Table
 
+from paper_assistant_rag.archrag_gated import retrieve_archrag_gated_chunks_with_score
+from paper_assistant_rag.archrag_generation import archrag_level_results_to_documents
+from paper_assistant_rag.archrag_index import hierarchical_search, load_archrag_index
 from paper_assistant_rag.community_retrieval import retrieve_community_augmented_chunks_with_score
 from paper_assistant_rag.graph_retrieval import retrieve_graph_chunks_with_score
 from paper_assistant_rag.indexing import load_index
 from paper_assistant_rag.memory import clear_session_history
+from paper_assistant_rag.models import build_embeddings
 from paper_assistant_rag.paths import DEFAULT_EVAL_RUN_DIR
 from paper_assistant_rag.qa import (
     MAX_CHARS_PER_SOURCE,
@@ -40,6 +44,7 @@ def run_evaluation(
     output_dir: Path,
     graph_dir: Path,
     community_index_dir: Path,
+    archrag_dir: Path,
     k: int,
     limit: int | None,
     query_field: str,
@@ -47,6 +52,10 @@ def run_evaluation(
     with_answers: bool,
     session_prefix: str,
     community_k: int = 3,
+    candidate_papers: int = 5,
+    per_paper_k: int = 5,
+    top_k_per_level: int = 5,
+    max_levels: int | None = None,
     adaptive_filter: bool = True,
     retrieval_mode: str = "hybrid",
     concurrency: int = 1,
@@ -73,7 +82,12 @@ def run_evaluation(
             include_references=include_references,
             graph_dir=graph_dir,
             community_index_dir=community_index_dir,
+            archrag_dir=archrag_dir,
             community_k=community_k,
+            candidate_papers=candidate_papers,
+            per_paper_k=per_paper_k,
+            top_k_per_level=top_k_per_level,
+            max_levels=max_levels,
             adaptive_filter=adaptive_filter,
             retrieval_mode=mode,
         )
@@ -95,7 +109,12 @@ def run_evaluation(
         include_references=include_references,
         graph_dir=graph_dir,
         community_index_dir=community_index_dir,
+        archrag_dir=archrag_dir,
         community_k=community_k,
+        candidate_papers=candidate_papers,
+        per_paper_k=per_paper_k,
+        top_k_per_level=top_k_per_level,
+        max_levels=max_levels,
         retrieval_mode=mode,
         concurrency=concurrency,
     )
@@ -115,9 +134,14 @@ def run_evaluation(
         "index_dir": str(index_dir),
         "graph_dir": str(graph_dir),
         "community_index_dir": str(community_index_dir),
+        "archrag_dir": str(archrag_dir),
         "query_field": query_field,
         "k": k,
         "community_k": community_k,
+        "candidate_papers": candidate_papers,
+        "per_paper_k": per_paper_k,
+        "top_k_per_level": top_k_per_level,
+        "max_levels": max_levels,
         "adaptive_filter": adaptive_filter,
         "include_references": include_references,
         "with_answers": with_answers,
@@ -145,7 +169,12 @@ def _evaluate_items(
     include_references: bool,
     graph_dir: Path,
     community_index_dir: Path,
+    archrag_dir: Path,
     community_k: int,
+    candidate_papers: int,
+    per_paper_k: int,
+    top_k_per_level: int,
+    max_levels: int | None,
     retrieval_mode: str,
     concurrency: int,
 ) -> list[dict[str, Any]]:
@@ -165,7 +194,12 @@ def _evaluate_items(
             include_references=include_references,
             graph_dir=graph_dir,
             community_index_dir=community_index_dir,
+            archrag_dir=archrag_dir,
             community_k=community_k,
+            candidate_papers=candidate_papers,
+            per_paper_k=per_paper_k,
+            top_k_per_level=top_k_per_level,
+            max_levels=max_levels,
             retrieval_mode=retrieval_mode,
         )
 
@@ -198,7 +232,12 @@ def _evaluate_items(
                     include_references,
                     graph_dir,
                     community_index_dir,
+                    archrag_dir,
                     community_k,
+                    candidate_papers,
+                    per_paper_k,
+                    top_k_per_level,
+                    max_levels,
                     retrieval_mode,
                 ): (item_index, item, query)
                 for item_index, item, query in single_turn_jobs
@@ -227,7 +266,12 @@ def _evaluate_items(
             include_references=include_references,
             graph_dir=graph_dir,
             community_index_dir=community_index_dir,
+            archrag_dir=archrag_dir,
             community_k=community_k,
+            candidate_papers=candidate_papers,
+            per_paper_k=per_paper_k,
+            top_k_per_level=top_k_per_level,
+            max_levels=max_levels,
             retrieval_mode=retrieval_mode,
         )
 
@@ -246,7 +290,12 @@ def _evaluate_items_sequentially(
     include_references: bool,
     graph_dir: Path,
     community_index_dir: Path,
+    archrag_dir: Path,
     community_k: int,
+    candidate_papers: int,
+    per_paper_k: int,
+    top_k_per_level: int,
+    max_levels: int | None,
     retrieval_mode: str,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -265,7 +314,12 @@ def _evaluate_items_sequentially(
                 include_references=include_references,
                 graph_dir=graph_dir,
                 community_index_dir=community_index_dir,
+                archrag_dir=archrag_dir,
                 community_k=community_k,
+                candidate_papers=candidate_papers,
+                per_paper_k=per_paper_k,
+                top_k_per_level=top_k_per_level,
+                max_levels=max_levels,
                 retrieval_mode=retrieval_mode,
             )
         else:
@@ -283,7 +337,12 @@ def _evaluate_items_sequentially(
                 include_references=include_references,
                 graph_dir=graph_dir,
                 community_index_dir=community_index_dir,
+                archrag_dir=archrag_dir,
                 community_k=community_k,
+                candidate_papers=candidate_papers,
+                per_paper_k=per_paper_k,
+                top_k_per_level=top_k_per_level,
+                max_levels=max_levels,
                 retrieval_mode=retrieval_mode,
             )
         rows.append(row)
@@ -321,7 +380,12 @@ def _evaluate_single_turn_item(
     include_references: bool,
     graph_dir: Path,
     community_index_dir: Path,
+    archrag_dir: Path,
     community_k: int,
+    candidate_papers: int,
+    per_paper_k: int,
+    top_k_per_level: int,
+    max_levels: int | None,
     retrieval_mode: str,
     reset_answer_memory: bool = True,
 ) -> dict[str, Any]:
@@ -332,7 +396,12 @@ def _evaluate_single_turn_item(
         include_references=include_references,
         graph_dir=graph_dir,
         community_index_dir=community_index_dir,
+        archrag_dir=archrag_dir,
         community_k=community_k,
+        candidate_papers=candidate_papers,
+        per_paper_k=per_paper_k,
+        top_k_per_level=top_k_per_level,
+        max_levels=max_levels,
         retrieval_mode=retrieval_mode,
     )
     row = {
@@ -377,7 +446,12 @@ def _evaluate_multi_turn_item(
     include_references: bool,
     graph_dir: Path,
     community_index_dir: Path,
+    archrag_dir: Path,
     community_k: int,
+    candidate_papers: int,
+    per_paper_k: int,
+    top_k_per_level: int,
+    max_levels: int | None,
     retrieval_mode: str,
 ) -> dict[str, Any]:
     if answer_chain is not None:
@@ -401,7 +475,12 @@ def _evaluate_multi_turn_item(
                 include_references=include_references,
                 graph_dir=graph_dir,
                 community_index_dir=community_index_dir,
+                archrag_dir=archrag_dir,
                 community_k=community_k,
+                candidate_papers=candidate_papers,
+                per_paper_k=per_paper_k,
+                top_k_per_level=top_k_per_level,
+                max_levels=max_levels,
                 retrieval_mode=retrieval_mode,
                 reset_answer_memory=False,
             )
@@ -455,7 +534,12 @@ def _retrieve_rows(
     include_references: bool,
     graph_dir: Path,
     community_index_dir: Path,
+    archrag_dir: Path,
     community_k: int,
+    candidate_papers: int,
+    per_paper_k: int,
+    top_k_per_level: int,
+    max_levels: int | None,
     retrieval_mode: str,
 ) -> list[dict[str, Any]]:
     mode = normalize_retrieval_mode(retrieval_mode)
@@ -468,6 +552,20 @@ def _retrieve_rows(
             graph_dir=graph_dir,
         )
     elif mode == "archrag":
+        settings = Settings.from_env()
+        arch_index = load_archrag_index(archrag_dir)
+        search_result = hierarchical_search(
+            arch_index=arch_index,
+            query=query,
+            embeddings=build_embeddings(settings),
+            top_k_per_level=top_k_per_level,
+            max_levels=max_levels,
+        )
+        selected_results = archrag_level_results_to_documents(
+            search_result["level_results"],
+            limit=k,
+        )
+    elif mode == "archrag-lite":
         selected_results = retrieve_community_augmented_chunks_with_score(
             vectorstore=vectorstore,
             query=query,
@@ -475,6 +573,19 @@ def _retrieve_rows(
             include_references=include_references,
             graph_dir=graph_dir,
             community_index_dir=community_index_dir,
+            community_k=community_k,
+            include_community_docs=False,
+        )
+    elif mode == "archrag-gated":
+        selected_results = retrieve_archrag_gated_chunks_with_score(
+            vectorstore=vectorstore,
+            query=query,
+            k=k,
+            include_references=include_references,
+            graph_dir=graph_dir,
+            community_index_dir=community_index_dir,
+            candidate_papers=candidate_papers,
+            per_paper_k=per_paper_k,
             community_k=community_k,
             include_community_docs=False,
         )
@@ -502,6 +613,14 @@ def _retrieve_rows(
                 "graph_score": str(metadata.get("graph_score", "")),
                 "community_rank": str(metadata.get("community_rank", "")),
                 "community_id": str(metadata.get("community_id", "")),
+                "archrag_level": str(metadata.get("archrag_level", "")),
+                "archrag_node_id": str(metadata.get("archrag_node_id", "")),
+                "query_type": str(metadata.get("query_type", "")),
+                "candidate_paper": str(metadata.get("candidate_paper", "")),
+                "paper_score": str(metadata.get("paper_score", "")),
+                "keyword_score": str(metadata.get("keyword_score", "")),
+                "chunk_relevance_score": str(metadata.get("chunk_relevance_score", "")),
+                "gated_final_score": str(metadata.get("gated_final_score", "")),
                 "snippet": normalize_text(doc.page_content)[:280],
                 "text": normalize_text(doc.page_content),
             }
@@ -643,9 +762,12 @@ def _summarize(
         "k": k,
         "query_field": query_field,
         "target_paper_hit_rate": _mean_bool(retrieval_metrics, "target_paper_hit"),
+        "paper_hit@k": _mean_bool(retrieval_metrics, "target_paper_hit"),
         "all_target_papers_hit_rate": _mean_bool(retrieval_metrics, "all_target_papers_hit"),
         "evidence_hit_rate": _mean_bool(retrieval_metrics, "evidence_hit"),
+        "source_hit@k": _mean_bool(retrieval_metrics, "evidence_hit"),
         "exact_evidence_hit_rate": _mean_bool(retrieval_metrics, "exact_evidence_hit"),
+        "chunk_hit@k": _mean_bool(retrieval_metrics, "exact_evidence_hit"),
         "avg_target_paper_recall": _mean_float(retrieval_metrics, "target_paper_recall"),
         "avg_evidence_recall": _mean_float(retrieval_metrics, "evidence_recall"),
         "avg_exact_evidence_recall": _mean_float(retrieval_metrics, "exact_evidence_recall"),
@@ -746,6 +868,8 @@ def _write_markdown_report(markdown_path: Path, payload: dict[str, Any]) -> None
         f"- Retrieval mode: `{payload.get('retrieval_mode')}`",
         f"- Top-k: `{payload.get('k')}`",
         f"- Community-k: `{payload.get('community_k', '')}`",
+        f"- Candidate papers: `{payload.get('candidate_papers', '')}`",
+        f"- Per-paper-k: `{payload.get('per_paper_k', '')}`",
         f"- Adaptive filter: `{payload.get('adaptive_filter', '')}`",
         f"- Answers generated: `{payload.get('with_answers')}`",
         f"- Include references: `{payload.get('include_references')}`",
@@ -961,8 +1085,8 @@ def _answer_block(row: dict[str, Any]) -> str:
 
 def _retrieved_sources_table(row: dict[str, Any]) -> list[str]:
     lines = [
-        "| Rank | Gold? | BaseRank | GraphRank | Community | Source | Page | Chunk | Snippet |",
-        "| ---: | :---: | ---: | ---: | ---: | --- | ---: | ---: | --- |",
+        "| Rank | Gold? | BaseRank | GraphRank | Community | Gate | Source | Page | Chunk | Snippet |",
+        "| ---: | :---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | --- |",
     ]
     for source in row.get("retrieved", [])[:5]:
         is_gold = _retrieved_match_label(row.get("evidence", []), source)
@@ -973,6 +1097,7 @@ def _retrieved_sources_table(row: dict[str, Any]) -> list[str]:
             f"{_md_escape(str(source.get('base_rank', '')))} | "
             f"{_md_escape(str(source.get('graph_rank', '')))} | "
             f"{_md_escape(str(source.get('community_rank', '')))} | "
+            f"{_md_escape(str(source.get('gated_final_score', '')))} | "
             f"{_md_escape(str(source.get('source', '')))} | "
             f"{_md_escape(str(source.get('page', '')))} | "
             f"{_md_escape(str(source.get('chunk_id', '')))} | "

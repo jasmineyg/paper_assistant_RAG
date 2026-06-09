@@ -8,11 +8,15 @@ from typing import Annotated
 import typer
 from rich.table import Table
 
+from paper_assistant_rag.archrag_hierarchy import build_archrag_hierarchy_cache
+from paper_assistant_rag.archrag_index import build_archrag_index
 from paper_assistant_rag.communities import build_community_index
 from paper_assistant_rag.evaluation import run_evaluation
 from paper_assistant_rag.indexing import append_to_index, build_index
 from paper_assistant_rag.kg import build_kg_cache
+from paper_assistant_rag.models import build_embeddings
 from paper_assistant_rag.paths import (
+    DEFAULT_ARCHRAG_DIR,
     DEFAULT_COMMUNITY_INDEX_DIR,
     DEFAULT_EVAL_DATASET,
     DEFAULT_EVAL_RUN_DIR,
@@ -147,6 +151,60 @@ def community_build_command(
     )
 
 
+@app.command(name="archrag-build")
+def archrag_build_command(
+    graph_dir: Annotated[Path, typer.Option(help="Directory containing KG cache files.")] = DEFAULT_GRAPH_DIR,
+    archrag_dir: Annotated[
+        Path,
+        typer.Option(help="Directory used to save the hierarchical ArchRAG index."),
+    ] = DEFAULT_ARCHRAG_DIR,
+    max_levels: Annotated[
+        int,
+        typer.Option("--max-levels", min=1, help="Maximum hierarchy levels including level 0 entities."),
+    ] = 3,
+    min_nodes_per_level: Annotated[
+        int,
+        typer.Option("--min-nodes-per-level", min=2, help="Stop building upward when a level is smaller than this."),
+    ] = 5,
+    similarity_top_k: Annotated[
+        int,
+        typer.Option("--similarity-top-k", min=0, help="Attribute-similarity neighbors per node."),
+    ] = 5,
+    similarity_threshold: Annotated[
+        float,
+        typer.Option("--similarity-threshold", help="Minimum cosine similarity for attribute edges."),
+    ] = 0.65,
+    m_neighbors: Annotated[
+        int,
+        typer.Option("--m-neighbors", min=1, help="Intra-layer nearest-neighbor links per node."),
+    ] = 8,
+    community_algorithm: Annotated[
+        str,
+        typer.Option("--community-algorithm", help="Community algorithm: louvain, greedy, or label."),
+    ] = "louvain",
+) -> None:
+    """Build hierarchical attributed communities and a C-HNSW-like ArchRAG index."""
+    settings = Settings.from_env()
+    hierarchy = build_archrag_hierarchy_cache(
+        graph_dir=graph_dir,
+        archrag_dir=archrag_dir,
+        max_levels=max_levels,
+        min_nodes_per_level=min_nodes_per_level,
+        similarity_top_k=similarity_top_k,
+        similarity_threshold=similarity_threshold,
+        community_algorithm=community_algorithm,
+    )
+    arch_index = build_archrag_index(
+        hierarchy=hierarchy,
+        embeddings=build_embeddings(settings),
+        m_neighbors=m_neighbors,
+        archrag_dir=archrag_dir,
+    )
+    layer_counts = {level: len(layer.nodes) for level, layer in arch_index.layers.items()}
+    console.print(f"Saved hierarchical ArchRAG index to [cyan]{archrag_dir}[/cyan]")
+    console.print(f"Levels: {len(layer_counts)} | nodes per level: {layer_counts}")
+
+
 @app.command(name="ask")
 def ask_command(
     question: Annotated[str, typer.Argument(help="Question to answer from the paper knowledge base.")],
@@ -157,6 +215,10 @@ def ask_command(
         Path,
         typer.Option(help="Directory containing community summary FAISS index for archrag retrieval."),
     ] = DEFAULT_COMMUNITY_INDEX_DIR,
+    archrag_dir: Annotated[
+        Path,
+        typer.Option(help="Directory containing hierarchical ArchRAG index files."),
+    ] = DEFAULT_ARCHRAG_DIR,
     memory_db: Annotated[Path, typer.Option(help="SQLite database used to persist chat memory.")] = DEFAULT_MEMORY_DB,
     session: Annotated[str, typer.Option(help="Conversation session id used for chat memory.")] = "default",
     reset_memory: Annotated[
@@ -164,6 +226,10 @@ def ask_command(
         typer.Option("--reset-memory", help="Clear this session's chat memory before answering."),
     ] = False,
     k: Annotated[int, typer.Option(help="Number of source chunks to retrieve.")] = 10,
+    final_k: Annotated[
+        int | None,
+        typer.Option("--final-k", help="Final number of source chunks for answer context. Defaults to --k."),
+    ] = None,
     rebuild: Annotated[bool, typer.Option("--rebuild", help="Rebuild the index before asking.")] = False,
     show_snippets: Annotated[
         bool,
@@ -175,12 +241,43 @@ def ask_command(
     ] = False,
     retrieval_mode: Annotated[
         str,
-        typer.Option("--retrieval-mode", help="Retrieval mode: hybrid, graph, or archrag."),
+        typer.Option("--retrieval-mode", help="Retrieval mode: hybrid, graph, community, archrag-lite, archrag, or archrag-gated."),
     ] = "hybrid",
+    top_k_per_level: Annotated[
+        int,
+        typer.Option("--top-k-per-level", min=1, help="ArchRAG hierarchical search results kept at each level."),
+    ] = 5,
+    show_archrag_debug: Annotated[
+        bool,
+        typer.Option("--show-archrag-debug", help="Print hierarchical ArchRAG search and filtering diagnostics."),
+    ] = False,
+    max_levels: Annotated[
+        int | None,
+        typer.Option("--max-levels", min=1, help="Limit hierarchy levels used during ArchRAG query search."),
+    ] = None,
+    candidate_papers: Annotated[
+        int,
+        typer.Option("--candidate-papers", min=1, help="Number of candidate papers for archrag-gated mode."),
+    ] = 5,
+    per_paper_k: Annotated[
+        int,
+        typer.Option("--per-paper-k", min=1, help="Chunks to retrieve inside each candidate paper."),
+    ] = 5,
     community_k: Annotated[
         int,
         typer.Option("--community-k", min=0, help="Number of community summaries to retrieve in archrag mode."),
     ] = 3,
+    include_community_docs: Annotated[
+        bool,
+        typer.Option(
+            "--include-community-docs/--no-include-community-docs",
+            help="Allow a small quota of community summaries in final context.",
+        ),
+    ] = False,
+    show_retrieval_debug: Annotated[
+        bool,
+        typer.Option("--show-retrieval-debug", help="Print candidate papers and final chunk scores."),
+    ] = False,
     adaptive_filter: Annotated[
         bool,
         typer.Option(
@@ -197,13 +294,21 @@ def ask_command(
         memory_db=memory_db,
         session_id=session,
         reset_memory=reset_memory,
-        k=k,
+        k=final_k or k,
         rebuild=rebuild,
         show_snippets=show_snippets,
         include_references=include_references,
         graph_dir=graph_dir,
         community_index_dir=community_index_dir,
+        archrag_dir=archrag_dir,
         community_k=community_k,
+        candidate_papers=candidate_papers,
+        per_paper_k=per_paper_k,
+        include_community_docs=include_community_docs,
+        show_retrieval_debug=show_retrieval_debug,
+        top_k_per_level=top_k_per_level,
+        show_archrag_debug=show_archrag_debug,
+        max_levels=max_levels,
         adaptive_filter=adaptive_filter,
         retrieval_mode=retrieval_mode,
     )
@@ -235,6 +340,10 @@ def eval_command(
         Path,
         typer.Option(help="Directory containing community summary FAISS index for archrag retrieval."),
     ] = DEFAULT_COMMUNITY_INDEX_DIR,
+    archrag_dir: Annotated[
+        Path,
+        typer.Option(help="Directory containing hierarchical ArchRAG index files."),
+    ] = DEFAULT_ARCHRAG_DIR,
     k: Annotated[int, typer.Option(help="Number of source chunks to retrieve per item.")] = 10,
     limit: Annotated[
         int | None,
@@ -261,8 +370,24 @@ def eval_command(
     ] = "eval",
     retrieval_mode: Annotated[
         str,
-        typer.Option("--retrieval-mode", help="Retrieval mode: hybrid, graph, or archrag."),
+        typer.Option("--retrieval-mode", help="Retrieval mode: hybrid, graph, community, archrag-lite, archrag, or archrag-gated."),
     ] = "hybrid",
+    top_k_per_level: Annotated[
+        int,
+        typer.Option("--top-k-per-level", min=1, help="ArchRAG hierarchical search results kept at each level."),
+    ] = 5,
+    max_levels: Annotated[
+        int | None,
+        typer.Option("--max-levels", min=1, help="Limit hierarchy levels used during ArchRAG evaluation search."),
+    ] = None,
+    candidate_papers: Annotated[
+        int,
+        typer.Option("--candidate-papers", min=1, help="Number of candidate papers for archrag-gated mode."),
+    ] = 5,
+    per_paper_k: Annotated[
+        int,
+        typer.Option("--per-paper-k", min=1, help="Chunks to retrieve inside each candidate paper."),
+    ] = 5,
     community_k: Annotated[
         int,
         typer.Option("--community-k", min=0, help="Number of community summaries to retrieve in archrag mode."),
@@ -291,6 +416,7 @@ def eval_command(
         output_dir=output_dir,
         graph_dir=graph_dir,
         community_index_dir=community_index_dir,
+        archrag_dir=archrag_dir,
         k=k,
         limit=limit,
         query_field=query_field,
@@ -298,6 +424,10 @@ def eval_command(
         with_answers=with_answers,
         session_prefix=session_prefix,
         community_k=community_k,
+        candidate_papers=candidate_papers,
+        per_paper_k=per_paper_k,
+        top_k_per_level=top_k_per_level,
+        max_levels=max_levels,
         adaptive_filter=adaptive_filter,
         retrieval_mode=retrieval_mode,
         concurrency=concurrency,

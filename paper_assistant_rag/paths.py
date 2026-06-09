@@ -13,4 +13,5 @@ DEFAULT_EVAL_DATASET = ROOT_DIR / "data" / "eval" / "graph_mil_core_qa_v1.json"
 DEFAULT_EVAL_RUN_DIR = ROOT_DIR / "data" / "eval" / "runs"
 DEFAULT_GRAPH_DIR = ROOT_DIR / "data" / "graph"
 DEFAULT_COMMUNITY_INDEX_DIR = DEFAULT_GRAPH_DIR / "community_index"
+DEFAULT_ARCHRAG_DIR = ROOT_DIR / "data" / "index" / "archrag"
 DEFAULT_EMBED_BATCH_SIZE = 16

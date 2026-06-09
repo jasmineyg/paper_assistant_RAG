@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import warnings
 from pathlib import Path
 
@@ -16,14 +17,19 @@ from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from openai import OpenAIError
 
+from paper_assistant_rag.archrag_generation import generate_archrag_answer
+from paper_assistant_rag.archrag_generation import archrag_level_results_to_documents
+from paper_assistant_rag.archrag_index import hierarchical_search
+from paper_assistant_rag.archrag_index import load_archrag_index
 from paper_assistant_rag.community_retrieval import (
     adaptive_filter_documents,
     retrieve_community_augmented_chunks_with_score,
 )
+from paper_assistant_rag.archrag_gated import retrieve_archrag_gated_chunks_with_score
 from paper_assistant_rag.graph_retrieval import retrieve_graph_chunks_with_score
 from paper_assistant_rag.indexing import build_index, index_exists, load_index
 from paper_assistant_rag.memory import clear_session_history, get_session_history
-from paper_assistant_rag.models import build_llm
+from paper_assistant_rag.models import build_embeddings, build_llm
 from paper_assistant_rag.retrieval import (
     clean_model_output,
     ensure_answer_citations,
@@ -96,14 +102,35 @@ def ask_question(
     include_references: bool,
     graph_dir: Path,
     community_index_dir: Path,
+    archrag_dir: Path,
     community_k: int,
+    candidate_papers: int,
+    per_paper_k: int,
+    include_community_docs: bool,
+    show_retrieval_debug: bool,
+    top_k_per_level: int,
+    show_archrag_debug: bool,
+    max_levels: int | None,
     adaptive_filter: bool,
     retrieval_mode: str,
 ) -> None:
     settings = Settings.from_env()
+    mode = normalize_retrieval_mode(retrieval_mode)
     if reset_memory:
         clear_session_history(session_id=session_id, db_path=memory_db)
         console.print(f"[yellow]已清空会话记忆：{session_id}[/yellow]")
+
+    if mode == "archrag":
+        ask_archrag_question(
+            question=question,
+            archrag_dir=archrag_dir,
+            settings=settings,
+            top_k_per_level=top_k_per_level,
+            show_archrag_debug=show_archrag_debug,
+            max_levels=max_levels,
+            show_snippets=show_snippets,
+        )
+        return
 
     # 如果用户还没建索引，第一次提问时自动建一个最小索引。
     if rebuild or not index_exists(index_dir):
@@ -128,8 +155,12 @@ def ask_question(
         graph_dir=graph_dir,
         community_index_dir=community_index_dir,
         community_k=community_k,
+        candidate_papers=candidate_papers,
+        per_paper_k=per_paper_k,
+        include_community_docs=include_community_docs,
+        show_retrieval_debug=show_retrieval_debug,
         adaptive_filter=adaptive_filter,
-        retrieval_mode=retrieval_mode,
+        retrieval_mode=mode,
     )
     try:
         with console.status("[cyan]正在结合对话记忆检索并生成回答...[/cyan]", spinner="dots"):
@@ -153,6 +184,46 @@ def ask_question(
     print_sources(source_rows, show_snippets=show_snippets)
 
 
+def ask_archrag_question(
+    question: str,
+    archrag_dir: Path,
+    settings: Settings,
+    top_k_per_level: int,
+    show_archrag_debug: bool,
+    max_levels: int | None,
+    show_snippets: bool,
+) -> None:
+    """Answer a question with the hierarchical ArchRAG path only."""
+    try:
+        arch_index = load_archrag_index(archrag_dir)
+    except FileNotFoundError as exc:
+        console.print(f"[bold red]{safe_for_console(str(exc))}[/bold red]")
+        raise typer.Exit(1) from exc
+
+    llm = build_llm(settings)
+    embeddings = build_embeddings(settings)
+    try:
+        with console.status("[cyan]Running hierarchical ArchRAG search and adaptive filtering...[/cyan]", spinner="dots"):
+            result = generate_archrag_answer(
+                query=question,
+                arch_index=arch_index,
+                llm=llm,
+                embeddings=embeddings,
+                top_k_per_level=top_k_per_level,
+                max_levels=max_levels,
+            )
+    except (OpenAIError, HTTPError) as error:
+        print_model_error(error, settings)
+        raise typer.Exit(1) from error
+
+    console.print("\n[bold]Answer[/bold]")
+    print_answer(str(result["answer"]))
+    console.print()
+    print_sources(result["sources"], show_snippets=show_snippets)
+    if show_archrag_debug:
+        print_archrag_debug(result["debug_info"], arch_index)
+
+
 def build_conversational_rag_chain(
     vectorstore,
     settings: Settings,
@@ -161,7 +232,14 @@ def build_conversational_rag_chain(
     include_references: bool,
     graph_dir: Path | None = None,
     community_index_dir: Path | None = None,
+    archrag_dir: Path | None = None,
     community_k: int = 3,
+    candidate_papers: int = 5,
+    per_paper_k: int = 5,
+    include_community_docs: bool = False,
+    show_retrieval_debug: bool = False,
+    top_k_per_level: int = 5,
+    max_levels: int | None = None,
     adaptive_filter: bool = True,
     retrieval_mode: str = "hybrid",
 ):
@@ -172,7 +250,14 @@ def build_conversational_rag_chain(
         include_references=include_references,
         graph_dir=graph_dir,
         community_index_dir=community_index_dir,
+        archrag_dir=archrag_dir,
         community_k=community_k,
+        candidate_papers=candidate_papers,
+        per_paper_k=per_paper_k,
+        include_community_docs=include_community_docs,
+        show_retrieval_debug=show_retrieval_debug,
+        top_k_per_level=top_k_per_level,
+        max_levels=max_levels,
         adaptive_filter=adaptive_filter,
         retrieval_mode=retrieval_mode,
         llm=llm,
@@ -214,7 +299,14 @@ def build_hybrid_retriever(
     include_references: bool,
     graph_dir: Path | None = None,
     community_index_dir: Path | None = None,
+    archrag_dir: Path | None = None,
     community_k: int = 3,
+    candidate_papers: int = 5,
+    per_paper_k: int = 5,
+    include_community_docs: bool = False,
+    show_retrieval_debug: bool = False,
+    top_k_per_level: int = 5,
+    max_levels: int | None = None,
     adaptive_filter: bool = True,
     retrieval_mode: str = "hybrid",
     llm=None,
@@ -236,8 +328,23 @@ def build_hybrid_retriever(
                     graph_dir=graph_dir,
                 )
             elif mode == "archrag":
+                if archrag_dir is None:
+                    raise RetrievalServiceError("archrag retrieval requires archrag_dir")
+                arch_index = load_archrag_index(archrag_dir)
+                search_result = hierarchical_search(
+                    arch_index=arch_index,
+                    query=query,
+                    embeddings=build_embeddings(Settings.from_env()),
+                    top_k_per_level=top_k_per_level,
+                    max_levels=max_levels,
+                )
+                selected_results = archrag_level_results_to_documents(
+                    search_result["level_results"],
+                    limit=k,
+                )
+            elif mode == "archrag-lite":
                 if graph_dir is None or community_index_dir is None:
-                    raise RetrievalServiceError("archrag retrieval requires graph_dir and community_index_dir")
+                    raise RetrievalServiceError("archrag-lite retrieval requires graph_dir and community_index_dir")
                 selected_results = retrieve_community_augmented_chunks_with_score(
                     vectorstore=vectorstore,
                     query=query,
@@ -246,7 +353,20 @@ def build_hybrid_retriever(
                     graph_dir=graph_dir,
                     community_index_dir=community_index_dir,
                     community_k=community_k,
-                    include_community_docs=True,
+                    include_community_docs=include_community_docs,
+                )
+            elif mode == "archrag-gated":
+                selected_results = retrieve_archrag_gated_chunks_with_score(
+                    vectorstore=vectorstore,
+                    query=query,
+                    k=k,
+                    include_references=include_references,
+                    graph_dir=graph_dir,
+                    community_index_dir=community_index_dir,
+                    candidate_papers=candidate_papers,
+                    per_paper_k=per_paper_k,
+                    community_k=community_k,
+                    include_community_docs=include_community_docs,
                 )
             else:
                 selected_results = retrieve_chunks_with_score(
@@ -257,8 +377,10 @@ def build_hybrid_retriever(
                 )
         except (OpenAIError, HTTPError) as error:
             raise RetrievalServiceError(str(error)) from error
+        if show_retrieval_debug and mode == "archrag-gated":
+            print_gated_retrieval_debug(selected_results)
         documents = documents_with_source_metadata(selected_results)
-        if mode == "archrag" and adaptive_filter and llm is not None:
+        if mode == "archrag-lite" and adaptive_filter and llm is not None:
             return adaptive_filter_documents(
                 llm=llm,
                 query=query,
@@ -279,19 +401,88 @@ def normalize_retrieval_mode(retrieval_mode: str) -> str:
         "graph": "graph",
         "kg": "graph",
         "graph-assisted": "graph",
-        "community": "archrag",
-        "communities": "archrag",
+        "community": "archrag-lite",
+        "communities": "archrag-lite",
         "archrag": "archrag",
-        "archrag-lite": "archrag",
+        "archrag-lite": "archrag-lite",
+        "archrag-gated": "archrag-gated",
+        "archrag_gated": "archrag-gated",
+        "community-gated": "archrag-gated",
+        "community_gated": "archrag-gated",
     }
     if mode not in aliases:
-        raise typer.BadParameter("retrieval-mode must be one of: hybrid, graph, archrag")
+        raise typer.BadParameter("retrieval-mode must be one of: hybrid, graph, community, archrag-lite, archrag, archrag-gated")
     return aliases[mode]
 
 
 def print_retrieval_query(query: str) -> None:
     console.print("\n[bold]本轮检索问题[/bold]")
     console.print(safe_for_console(query), markup=False)
+
+
+def print_gated_retrieval_debug(results: list[tuple[Document, float]]) -> None:
+    """Print paper-gate and final-chunk diagnostics for archrag-gated mode."""
+    if not results:
+        return
+    metadata = results[0][0].metadata
+    query_type = str(metadata.get("query_type", ""))
+    raw_candidates = str(metadata.get("candidate_papers_json", "[]"))
+    try:
+        candidates = json.loads(raw_candidates)
+    except json.JSONDecodeError:
+        candidates = []
+
+    console.print("\n[bold]ArchRAG-gated debug[/bold]")
+    if query_type:
+        console.print(f"query_type: {safe_for_console(query_type)}")
+    if candidates:
+        console.print("candidate papers:")
+        for index, candidate in enumerate(candidates, start=1):
+            source = safe_for_console(str(candidate.get("source", "")))
+            score = candidate.get("score", "")
+            signals = candidate.get("signals", {})
+            console.print(f"  {index}. {source} score={score} signals={signals}")
+    console.print("final chunks:")
+    for rank, (doc, score) in enumerate(results, start=1):
+        row = (
+            f"  {rank}. {doc.metadata.get('source', 'unknown')} "
+            f"p{doc.metadata.get('page', '?')} c{doc.metadata.get('chunk_id', '?')} "
+            f"score={score:.4f} paper_score={doc.metadata.get('paper_score', '')} "
+            f"keyword={doc.metadata.get('keyword_score', '')}"
+        )
+        console.print(safe_for_console(row))
+
+
+def print_archrag_debug(debug_info: dict, arch_index) -> None:
+    """Print hierarchical ArchRAG search and adaptive-filtering diagnostics."""
+    console.print("\n[bold]ArchRAG debug[/bold]")
+    layer_counts = {level: len(layer.nodes) for level, layer in sorted(arch_index.layers.items())}
+    console.print(f"hierarchy levels: {len(layer_counts)}")
+    console.print(f"nodes per level: {layer_counts}")
+    search = debug_info.get("search", {})
+    level_results = search.get("level_results", {})
+    for level in sorted(level_results, reverse=True):
+        console.print(f"level {level} top nodes:")
+        for item in level_results[level]:
+            console.print(
+                safe_for_console(
+                    f"  {item.get('node_id')} score={float(item.get('score', 0.0)):.4f} "
+                    f"type={item.get('node_type')} chunks={len(item.get('source_chunks', []))}"
+                )
+            )
+    points = debug_info.get("points", [])
+    if points:
+        console.print("adaptive filtering points:")
+        for point in points:
+            console.print(
+                safe_for_console(
+                    f"  L{point.get('level')} {point.get('node_id')} "
+                    f"score={float(point.get('score', 0.0)):.1f}: {point.get('description', '')}"
+                )
+            )
+    used_chunks = debug_info.get("used_source_chunks", [])
+    if used_chunks:
+        console.print(f"used source chunks: {', '.join(str(chunk) for chunk in used_chunks)}")
 
 
 def print_retrieval_error(error: RetrievalServiceError, settings: Settings) -> None:

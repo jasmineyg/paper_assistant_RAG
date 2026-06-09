@@ -91,11 +91,13 @@ def retrieve_community_augmented_chunks_with_score(
 
     selected = selected_chunks[:k]
     if include_community_docs:
+        community_doc_limit = min(len(community_results), max(1, min(2, k // 4)))
+        chunk_limit = max(k - community_doc_limit, 0)
         community_docs = [
             (_with_community_score_metadata(doc, rank), 1.0 / (ARCHRAG_RRF_K + rank))
             for rank, (doc, _score) in enumerate(community_results, start=1)
-        ]
-        return community_docs + selected
+        ][:community_doc_limit]
+        return selected[:chunk_limit] + community_docs
     return (selected + reference_like)[:k]
 
 
