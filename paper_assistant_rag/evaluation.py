@@ -15,13 +15,13 @@ from openai import OpenAIError
 from rich.table import Table
 
 from paper_assistant_rag.archrag_gated import retrieve_archrag_gated_chunks_with_score
-from paper_assistant_rag.archrag_generation import archrag_level_results_to_documents
+from paper_assistant_rag.archrag_generation import archrag_level_results_to_documents, generate_archrag_answer
 from paper_assistant_rag.archrag_index import hierarchical_search, load_archrag_index
 from paper_assistant_rag.community_retrieval import retrieve_community_augmented_chunks_with_score
 from paper_assistant_rag.graph_retrieval import retrieve_graph_chunks_with_score
 from paper_assistant_rag.indexing import load_index
 from paper_assistant_rag.memory import clear_session_history
-from paper_assistant_rag.models import build_embeddings
+from paper_assistant_rag.models import build_embeddings, build_llm
 from paper_assistant_rag.paths import DEFAULT_EVAL_RUN_DIR
 from paper_assistant_rag.qa import (
     MAX_CHARS_PER_SOURCE,
@@ -74,23 +74,26 @@ def run_evaluation(
 
     answer_chain = None
     if with_answers:
-        answer_chain = build_conversational_rag_chain(
-            vectorstore=vectorstore,
-            settings=settings,
-            memory_db=memory_db,
-            k=k,
-            include_references=include_references,
-            graph_dir=graph_dir,
-            community_index_dir=community_index_dir,
-            archrag_dir=archrag_dir,
-            community_k=community_k,
-            candidate_papers=candidate_papers,
-            per_paper_k=per_paper_k,
-            top_k_per_level=top_k_per_level,
-            max_levels=max_levels,
-            adaptive_filter=adaptive_filter,
-            retrieval_mode=mode,
-        )
+        if mode == "archrag":
+            answer_chain = "archrag"
+        else:
+            answer_chain = build_conversational_rag_chain(
+                vectorstore=vectorstore,
+                settings=settings,
+                memory_db=memory_db,
+                k=k,
+                include_references=include_references,
+                graph_dir=graph_dir,
+                community_index_dir=community_index_dir,
+                archrag_dir=archrag_dir,
+                community_k=community_k,
+                candidate_papers=candidate_papers,
+                per_paper_k=per_paper_k,
+                top_k_per_level=top_k_per_level,
+                max_levels=max_levels,
+                adaptive_filter=adaptive_filter,
+                retrieval_mode=mode,
+            )
 
     paper_sources = {
         str(paper["paper_id"]): str(paper["source"])
@@ -420,7 +423,16 @@ def _evaluate_single_turn_item(
         "retrieval_metrics": _score_retrieval(item, retrieval_rows, paper_sources),
     }
 
-    if answer_chain is not None:
+    if answer_chain == "archrag":
+        row.update(
+            _answer_archrag_item(
+                query=query,
+                archrag_dir=archrag_dir,
+                top_k_per_level=top_k_per_level,
+                max_levels=max_levels,
+            )
+        )
+    elif answer_chain is not None:
         row.update(
             _answer_item(
                 chain=answer_chain,
@@ -543,6 +555,7 @@ def _retrieve_rows(
     retrieval_mode: str,
 ) -> list[dict[str, Any]]:
     mode = normalize_retrieval_mode(retrieval_mode)
+    archrag_debug: dict[str, Any] = {}
     if mode == "graph":
         selected_results = retrieve_graph_chunks_with_score(
             vectorstore,
@@ -561,6 +574,22 @@ def _retrieve_rows(
             top_k_per_level=top_k_per_level,
             max_levels=max_levels,
         )
+        archrag_debug = {
+            "path": search_result.get("path", []),
+            "level_results": {
+                str(level): [
+                    {
+                        "node_id": str(node.get("node_id", "")),
+                        "node_type": str(node.get("node_type", "")),
+                        "name": str(node.get("name", "")),
+                        "score": float(node.get("score", 0.0)),
+                        "source_chunks": list(node.get("source_chunks", [])),
+                    }
+                    for node in nodes
+                ]
+                for level, nodes in search_result.get("level_results", {}).items()
+            },
+        }
         selected_results = archrag_level_results_to_documents(
             search_result["level_results"],
             limit=k,
@@ -599,8 +628,7 @@ def _retrieve_rows(
     rows: list[dict[str, Any]] = []
     for rank, (doc, score) in enumerate(selected_results, start=1):
         metadata = doc.metadata
-        rows.append(
-            {
+        row = {
                 "rank": rank,
                 "document_type": str(metadata.get("document_type", "chunk")),
                 "source": str(metadata.get("source", "unknown")),
@@ -615,6 +643,10 @@ def _retrieve_rows(
                 "community_id": str(metadata.get("community_id", "")),
                 "archrag_level": str(metadata.get("archrag_level", "")),
                 "archrag_node_id": str(metadata.get("archrag_node_id", "")),
+                "archrag_node_name": str(metadata.get("archrag_node_name", "")),
+                "archrag_node_type": str(metadata.get("archrag_node_type", "")),
+                "archrag_node_score": str(metadata.get("archrag_node_score", "")),
+                "adaptive_filter_score": str(metadata.get("chunk_relevance_score") or metadata.get("archrag_node_score", "")),
                 "query_type": str(metadata.get("query_type", "")),
                 "candidate_paper": str(metadata.get("candidate_paper", "")),
                 "paper_score": str(metadata.get("paper_score", "")),
@@ -624,7 +656,9 @@ def _retrieve_rows(
                 "snippet": normalize_text(doc.page_content)[:280],
                 "text": normalize_text(doc.page_content),
             }
-        )
+        if mode == "archrag" and rank == 1:
+            row["archrag_debug"] = archrag_debug
+        rows.append(row)
     return rows
 
 
@@ -740,6 +774,49 @@ def _answer_item(
     return {
         "answer": answer,
         "answer_sources": answer_sources,
+        "answer_metrics": {
+            "answer_present": bool(answer.strip()),
+            "citation_present": bool(re.search(r"\[S\d+\]", answer)),
+            "answer_length": len(answer),
+        },
+    }
+
+
+def _answer_archrag_item(
+    query: str,
+    archrag_dir: Path,
+    top_k_per_level: int,
+    max_levels: int | None,
+) -> dict[str, Any]:
+    """Generate an evaluation answer through ArchRAG adaptive filtering."""
+    settings = Settings.from_env()
+    try:
+        result = generate_archrag_answer(
+            query=query,
+            arch_index=load_archrag_index(archrag_dir),
+            llm=build_llm(settings),
+            embeddings=build_embeddings(settings),
+            top_k_per_level=top_k_per_level,
+            max_levels=max_levels,
+        )
+    except (OpenAIError, HTTPError) as exc:
+        return {
+            "answer": "",
+            "answer_error": str(exc),
+            "answer_sources": [],
+            "answer_metrics": {
+                "answer_present": False,
+                "citation_present": False,
+                "answer_length": 0,
+            },
+        }
+
+    answer = str(result.get("answer", ""))
+    debug_info = result.get("debug_info", {})
+    return {
+        "answer": answer,
+        "answer_sources": result.get("sources", []),
+        "archrag_generation_debug": debug_info,
         "answer_metrics": {
             "answer_present": bool(answer.strip()),
             "citation_present": bool(re.search(r"\[S\d+\]", answer)),

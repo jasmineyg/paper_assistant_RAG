@@ -160,6 +160,10 @@ def archrag_level_results_to_documents(
                     "stable_chunk_id": ref.get("stable_chunk_id", ""),
                     "archrag_level": str(level),
                     "archrag_node_id": str(node.get("node_id", "")),
+                    "archrag_node_name": str(node.get("name", "")),
+                    "archrag_node_type": str(node.get("node_type", "")),
+                    "archrag_node_score": f"{score:.6f}",
+                    "archrag_source_chunks_json": json.dumps(node.get("source_chunks", [])[:30], ensure_ascii=False),
                     "community_id": str(node.get("node_id", "")),
                 }
                 text = normalize_text(str(node.get("summary") or node.get("text") or ""))

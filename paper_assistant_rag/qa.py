@@ -17,6 +17,7 @@ from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from openai import OpenAIError
 
+from paper_assistant_rag.archrag.pipeline import ArchRAGPipeline
 from paper_assistant_rag.archrag_generation import generate_archrag_answer
 from paper_assistant_rag.archrag_generation import archrag_level_results_to_documents
 from paper_assistant_rag.archrag_index import hierarchical_search
@@ -121,6 +122,18 @@ def ask_question(
         console.print(f"[yellow]已清空会话记忆：{session_id}[/yellow]")
 
     if mode == "archrag":
+        if rebuild or not (archrag_dir / "hierarchy.json").exists():
+            console.print("[yellow]ArchRAG hierarchy index not found; building the offline ArchRAG pipeline first.[/yellow]")
+            try:
+                ArchRAGPipeline(
+                    paper_dir=paper_dir,
+                    index_dir=index_dir,
+                    graph_dir=graph_dir,
+                    archrag_dir=archrag_dir,
+                ).build(force=rebuild)
+            except Exception as exc:
+                console.print(f"[bold red]ArchRAG offline build failed:[/bold red] {safe_for_console(str(exc))}")
+                raise typer.Exit(1) from exc
         ask_archrag_question(
             question=question,
             archrag_dir=archrag_dir,

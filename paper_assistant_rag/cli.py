@@ -8,6 +8,7 @@ from typing import Annotated
 import typer
 from rich.table import Table
 
+from paper_assistant_rag.archrag.pipeline import ArchRAGPipeline
 from paper_assistant_rag.archrag_hierarchy import build_archrag_hierarchy_cache
 from paper_assistant_rag.archrag_index import build_archrag_index
 from paper_assistant_rag.communities import build_community_index
@@ -210,6 +211,81 @@ def archrag_build_command(
     console.print(f"Levels: {len(layer_counts)} | nodes per level: {layer_counts}")
 
 
+@app.command(name="archrag-index")
+def archrag_index_command(
+    paper_dir: Annotated[Path, typer.Option(help="Directory containing PDF papers.")] = DEFAULT_PAPER_DIR,
+    index_dir: Annotated[Path, typer.Option(help="Directory used to save the chunk FAISS index.")] = DEFAULT_INDEX_DIR,
+    graph_dir: Annotated[Path, typer.Option(help="Directory used to save KG cache files.")] = DEFAULT_GRAPH_DIR,
+    archrag_dir: Annotated[
+        Path,
+        typer.Option(help="Directory used to save the hierarchical ArchRAG index."),
+    ] = DEFAULT_ARCHRAG_DIR,
+    chunk_size: Annotated[int, typer.Option(help="Characters per chunk.")] = 1000,
+    chunk_overlap: Annotated[int, typer.Option(help="Overlapping characters between chunks.")] = 180,
+    max_levels: Annotated[
+        int,
+        typer.Option("--max-levels", min=1, help="Maximum hierarchy levels including level 0 entities."),
+    ] = 3,
+    min_nodes_per_level: Annotated[
+        int,
+        typer.Option("--min-nodes-per-level", min=2, help="Stop building upward when a level is smaller than this."),
+    ] = 5,
+    similarity_top_k: Annotated[
+        int,
+        typer.Option("--similarity-top-k", min=0, help="Attribute-similarity neighbors per node."),
+    ] = 5,
+    similarity_threshold: Annotated[
+        float,
+        typer.Option("--similarity-threshold", help="Minimum cosine similarity for attribute edges."),
+    ] = 0.65,
+    m_neighbors: Annotated[
+        int,
+        typer.Option("--m-neighbors", min=1, help="Intra-layer nearest-neighbor links per node."),
+    ] = 8,
+    community_algorithm: Annotated[
+        str,
+        typer.Option("--community-algorithm", help="Community algorithm: louvain, greedy, or label."),
+    ] = "louvain",
+    kg_limit: Annotated[
+        int | None,
+        typer.Option("--kg-limit", help="Extract only the first N chunks for an ArchRAG smoke test."),
+    ] = None,
+    max_chars_per_chunk: Annotated[
+        int,
+        typer.Option(help="Maximum chunk text characters sent to the LLM extractor."),
+    ] = 2500,
+    extraction_concurrency: Annotated[
+        int,
+        typer.Option("--extraction-concurrency", min=1, help="Concurrent chunk extraction calls."),
+    ] = 12,
+    summary_concurrency: Annotated[
+        int,
+        typer.Option("--summary-concurrency", min=1, help="Concurrent community summary calls."),
+    ] = 12,
+    force: Annotated[bool, typer.Option("--force", help="Rebuild all ArchRAG artifacts.")] = False,
+) -> None:
+    """Build the full ArchRAG offline pipeline from PDFs to hierarchical index."""
+    summary = ArchRAGPipeline(
+        paper_dir=paper_dir,
+        index_dir=index_dir,
+        graph_dir=graph_dir,
+        archrag_dir=archrag_dir,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        max_levels=max_levels,
+        min_nodes_per_level=min_nodes_per_level,
+        similarity_top_k=similarity_top_k,
+        similarity_threshold=similarity_threshold,
+        m_neighbors=m_neighbors,
+        community_algorithm=community_algorithm,
+        max_chars_per_chunk=max_chars_per_chunk,
+        extraction_concurrency=extraction_concurrency,
+        summary_concurrency=summary_concurrency,
+    ).build(force=force, kg_limit=kg_limit)
+    console.print(f"Saved ArchRAG pipeline manifest to [cyan]{archrag_dir / 'pipeline_manifest.json'}[/cyan]")
+    console.print(f"Levels: {summary['levels']} | nodes per level: {summary['layer_node_counts']}")
+
+
 @app.command(name="ask")
 def ask_command(
     question: Annotated[str, typer.Argument(help="Question to answer from the paper knowledge base.")],
@@ -247,7 +323,7 @@ def ask_command(
     retrieval_mode: Annotated[
         str,
         typer.Option("--retrieval-mode", help="Retrieval mode: hybrid, graph, community, archrag-lite, archrag, or archrag-gated."),
-    ] = "hybrid",
+    ] = "archrag",
     top_k_per_level: Annotated[
         int,
         typer.Option("--top-k-per-level", min=1, help="ArchRAG hierarchical search results kept at each level."),
@@ -376,7 +452,7 @@ def eval_command(
     retrieval_mode: Annotated[
         str,
         typer.Option("--retrieval-mode", help="Retrieval mode: hybrid, graph, community, archrag-lite, archrag, or archrag-gated."),
-    ] = "hybrid",
+    ] = "archrag",
     top_k_per_level: Annotated[
         int,
         typer.Option("--top-k-per-level", min=1, help="ArchRAG hierarchical search results kept at each level."),

@@ -112,14 +112,24 @@ def build_attributed_entity_graph(
         if subject_id not in graph or object_id not in graph or subject_id == object_id:
             continue
         predicate = str(relation.get("predicate", "other"))
-        weight = relation_weight * PREDICATE_WEIGHTS.get(predicate, 0.5)
+        structural_weight = PREDICATE_WEIGHTS.get(predicate, 0.5)
+        semantic_similarity = _cosine(
+            graph.nodes[subject_id].get("embedding", []),
+            graph.nodes[object_id].get("embedding", []),
+        )
+        weight = relation_weight * structural_weight + attribute_weight * max(0.0, semantic_similarity)
         _add_or_update_edge(
             graph,
             subject_id,
             object_id,
             weight=weight,
             edge_type="relation",
-            relation=relation,
+            relation={
+                **relation,
+                "structural_weight": structural_weight,
+                "semantic_similarity": semantic_similarity,
+                "archrag_weight_formula": "alpha * structural_weight + beta * semantic_similarity",
+            },
         )
 
     _add_attribute_similarity_edges(

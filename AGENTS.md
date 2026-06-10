@@ -2,69 +2,153 @@
 
 ## 项目目的
 
-paper_assistant_RAG 是学术论文 RAG 助手，核心目标：
-1. 构建本地论文知识库（PDF → chunks → vector/FAISS index）。
-2. 支持问答、方法检索、连续追问。
-3. 输出可追溯引用（paper / page / chunk）。
-4. 支持混合检索、KG + graph、ArchRAG-like community 检索。
-5. 优先保证 chunk 命中率和引用可追溯性。
+paper_assistant_RAG 已从普通 Hybrid RAG 重构为 ArchRAG-style 学术论文 RAG 助手。核心目标：
 
-**开发原则**：
-- 功能优先，架构次之。
-- 每次修改必须考虑对 paper hit / chunk hit / citation 的影响。
-- 不要把新功能塞进 main.py。
-- memory 仅辅助问题改写，不可替代检索。
-- stable_chunk_id 不可随意改动。
+1. 构建本地论文知识库：PDF -> chunks -> KG -> attributed communities -> hierarchical index。
+2. 默认问答流程使用 ArchRAG：多层 entity/community 检索 + adaptive filtering-based generation。
+3. 输出可追溯引用：paper / page / chunk / stable_chunk_id。
+4. 保留 hybrid / graph / community-gated 作为 baseline，但不作为默认主流程。
+5. 优先保证 chunk 命中率、citation 可追溯性，以及 entity/community 命中调试信息。
 
----
+开发原则：
+
+- 功能优先，架构服务于论文流程。
+- 每次修改必须考虑对 paper hit / chunk hit / citation / entity hit / community hit 的影响。
+- 不要把新功能塞进 `main.py`；CLI 只放命令编排，核心逻辑放模块。
+- memory 仅辅助问题改写，不可替代本轮 ArchRAG 检索。
+- `stable_chunk_id` 不可随意改动。
+- 修改 ArchRAG 流程、数据结构或命令时，必须同步维护本文件。
+
+## ArchRAG 对齐流程
+
+### Offline Indexing
+
+当前默认离线阶段：
+
+```text
+PDF / Paper Corpus
+-> Chunking
+-> LLM Entity & Relation Extraction
+-> Knowledge Graph Construction
+-> Entity / Relation Attribute Embedding
+-> Attribute-aware Graph Augmentation
+-> Weighted Community Detection
+-> Community Summary Generation
+-> Iterative Hierarchical Community Construction
+-> Hierarchical Index Construction
+```
+
+对应入口：
+
+- `uv run python main.py archrag-index`：完整离线构建，从 PDF 到层级索引。
+- `uv run python main.py index`：仅构建 chunk FAISS baseline。
+- `uv run python main.py kg-build`：仅构建 KG cache。
+- `uv run python main.py archrag-build`：基于已有 KG 构建 hierarchical attributed communities 和 C-HNSW-like index。
+
+### Online Retrieval
+
+当前默认在线阶段：
+
+```text
+Query Embedding
+-> Hierarchical Search over entities + communities
+-> Per-level adaptive filtering reports
+-> Ranked evidence selection
+-> Final Answer Generation
+```
+
+对应入口：
+
+- `uv run python main.py ask "问题"`：默认 `--retrieval-mode archrag`。
+- `uv run python main.py eval`：默认 `--retrieval-mode archrag`。
+- baseline 需要显式指定：`--retrieval-mode hybrid`、`graph`、`archrag-lite` 或 `archrag-gated`。
 
 ## 文件导航与关键入口
 
 ### 核心命令入口
-- `main.py` → 入口，不改功能。
-- `cli.py` → 命令定义：index / append / kg-build / community-build / ask / eval / models。
 
-### 数据与索引
-- `documents.py` → PDF 解析、chunk 切分、metadata 生成。
-- `indexing.py` → FAISS 索引构建与追加。
-- `paths.py` → 数据路径管理。
+- `main.py`：Typer 入口，不放功能逻辑。
+- `paper_assistant_rag/cli.py`：命令定义：`index` / `append` / `kg-build` / `community-build` / `archrag-index` / `archrag-build` / `ask` / `eval` / `models`。
 
-### 检索模块
-- `retrieval.py` → hybrid 检索、keyword 检索、RRF 融合。
-- `graph_retrieval.py` → graph 扩展检索（依赖 KG）。
-- `community_retrieval.py` → ArchRAG-like community 检索。
+### PDF、chunk 与 baseline index
 
-### KG 与 Community
-- `kg.py` → 实体/关系抽取，KG cache。
-- `communities.py` → community detection，community summary，community FAISS index。
+- `paper_assistant_rag/documents.py`：PDF 解析、chunk 切分、metadata 与 `stable_chunk_id`。
+- `paper_assistant_rag/indexing.py`：chunk FAISS baseline index 构建、追加、加载。
+- `paper_assistant_rag/paths.py`：数据路径管理。
 
-### 问答与记忆
-- `qa.py` → 问答流程，Prompt 定义，retriever 调用。
-- `memory.py` → 会话历史管理。
+### ArchRAG package
+
+- `paper_assistant_rag/archrag/pipeline.py`：完整离线 ArchRAG pipeline 编排。
+- `paper_assistant_rag/archrag/kg_builder.py`：ArchRAG entity/relation textual attributes，`archrag_attributed_kg.json` 持久化。
+- `paper_assistant_rag/archrag/attributed_graph.py`：attribute-aware graph augmentation。
+- `paper_assistant_rag/archrag/community_detection.py`：weighted community detection facade。
+- `paper_assistant_rag/archrag/community_summary.py`：LLM community summary facade。
+- `paper_assistant_rag/archrag/hierarchy_builder.py`：Algorithm 1 风格迭代层级 community 构建。
+- `paper_assistant_rag/archrag/hierarchical_index.py`：C-HNSW-like hierarchical index facade。
+- `paper_assistant_rag/archrag/hierarchical_retriever.py`：多层 entity/community 检索。
+- `paper_assistant_rag/archrag/adaptive_filter.py`：adaptive filtering report + final merge generation。
+
+### ArchRAG 底层兼容模块
+
+- `paper_assistant_rag/archrag_types.py`：`ArchNode`、`ArchLayer`、`ArchIndex` 及 JSON persistence。
+- `paper_assistant_rag/archrag_hierarchy.py`：层级 attributed community 构建实现。
+- `paper_assistant_rag/archrag_index.py`：C-HNSW-like intra/inter links 与 hierarchical search。
+- `paper_assistant_rag/archrag_generation.py`：adaptive filtering-based generation 和 source backprojection。
+
+### KG 与旧 community baseline
+
+- `paper_assistant_rag/kg.py`：LLM 实体/关系抽取，KG cache。
+- `paper_assistant_rag/communities.py`：single-level KG community baseline。
+
+### Baseline retrieval
+
+- `paper_assistant_rag/retrieval.py`：hybrid 检索、keyword 检索、RRF 融合。
+- `paper_assistant_rag/graph_retrieval.py`：graph 扩展检索 baseline。
+- `paper_assistant_rag/community_retrieval.py`：single-level community augmented baseline。
+- `paper_assistant_rag/archrag_gated.py`：paper gate baseline。
+
+### QA、记忆、评测
+
+- `paper_assistant_rag/qa.py`：问答流程；默认 ArchRAG，旧 conversational RAG 仅用于 baseline。
+- `paper_assistant_rag/memory.py`：会话历史管理，只用于追问理解。
+- `paper_assistant_rag/evaluation.py`：评测 paper / chunk hit rate，并输出 ArchRAG level/entity/community/debug 字段。
+- `paper_assistant_rag/ui.py`：Rich 终端输出。
 
 ### 模型与配置
-- `settings.py` → LLM / embedding provider 配置。
-- `models.py` → LLM / embedding 构建。
-- `.env.example` → API key 和环境变量示例。
 
-### UI 与评测
-- `ui.py` → Rich 终端输出。
-- `evaluation.py` → 评测 paper / chunk hit rate，生成报告。
+- `paper_assistant_rag/settings.py`：LLM / embedding provider 配置。
+- `paper_assistant_rag/models.py`：LLM / embedding 构建。
+- `.env.example`：API key 和环境变量示例。
 
----
+## 重要类和函数
 
-## 使用建议
+- `ArchRAGPipeline.build()`：完整离线构建。
+- `build_kg_cache()`：chunk -> entity/relation extraction。
+- `persist_attributed_kg()`：entity/relation textual attributes + embeddings snapshot。
+- `build_hierarchical_communities()`：迭代 attributed community hierarchy。
+- `build_archrag_index()`：C-HNSW-like layer links。
+- `hierarchical_search()`：top-down multi-level retrieval。
+- `generate_archrag_answer()`：hierarchical search -> adaptive filtering -> final answer。
+- `run_evaluation()`：评测并输出 retrieval/debug/report artifacts。
 
-1. 先读本文件，明确任务属于哪一层：
-   - PDF/chunk → documents.py / indexing.py
-   - 检索逻辑 → retrieval.py / graph_retrieval.py / community_retrieval.py
-   - KG 构建 → kg.py
-   - Community 构建 → communities.py
-   - QA/Prompt → qa.py
-   - 会话记忆 → memory.py
-   - 模型配置 → settings.py / models.py
-   - CLI → cli.py
-   - UI/评测 → ui.py / evaluation.py
+## 数据产物
 
-2. 修改前考虑对检索、chunk 命中率、引用的影响。
-3. 优先定位相关模块，避免全仓库扫描。
+- `vectorstore/faiss_index/`：chunk FAISS baseline index，仍用于 chunk store 和 baseline。
+- `data/graph/chunk_extractions.jsonl`：每个 chunk 的 LLM extraction cache。
+- `data/graph/entities.jsonl`：KG entities。
+- `data/graph/relations.jsonl`：KG relations。
+- `data/graph/archrag_attributed_kg.json`：ArchRAG textual attributes + embeddings snapshot。
+- `data/index/archrag/hierarchy.json`：层级 entity/community tree。
+- `data/index/archrag/nodes.jsonl`：所有层级节点。
+- `data/index/archrag/intra_links.json`：C-HNSW-like intra-layer links。
+- `data/index/archrag/inter_links.json`：C-HNSW-like inter-layer links。
+- `data/index/archrag/pipeline_manifest.json`：完整离线构建 manifest。
+- `data/eval/runs/`：评测 JSON/CSV/Markdown/JSONL。
+
+## 修改建议
+
+1. 先判断任务属于哪一层：chunk、KG、attribute graph、community、hierarchy、index、retrieval、generation、evaluation。
+2. 修改检索或生成前，明确它影响的是 paper hit、chunk hit、entity/community hit、adaptive filtering，还是 citation。
+3. 不要把普通 hybrid retrieval 重新设为默认主流程；它只能作为 baseline。
+4. 层级节点必须保留 source chunk 回溯信息，最终答案引用必须能落回 paper/page/chunk。
+5. 若新增中间产物，必须可持久化并在缺失时有清晰错误或自动构建路径。
