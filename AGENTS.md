@@ -61,6 +61,7 @@ Query Embedding
 
 - `uv run python main.py ask "问题"`：默认 `--retrieval-mode archrag`。
 - `uv run python main.py eval`：默认 `--retrieval-mode archrag`。
+- `uv run streamlit run app/streamlit_app.py`：本机浏览器 UI，默认调用 ArchRAG service，可切换 Baseline Hybrid RAG。
 - baseline 需要显式指定：`--retrieval-mode hybrid`、`graph`、`archrag-lite` 或 `archrag-gated`。
 
 ## 文件导航与关键入口
@@ -110,9 +111,11 @@ Query Embedding
 ### QA、记忆、评测
 
 - `paper_assistant_rag/qa.py`：问答流程；默认 ArchRAG，旧 conversational RAG 仅用于 baseline。
+- `paper_assistant_rag/service.py`：非 CLI 调用门面；Streamlit UI 通过它调用 ArchRAG / Hybrid pipeline，不在页面中重写 RAG 逻辑。
 - `paper_assistant_rag/memory.py`：会话历史管理，只用于追问理解。
 - `paper_assistant_rag/evaluation.py`：评测 paper / chunk hit rate，并输出 ArchRAG level/entity/community/debug 字段。
 - `paper_assistant_rag/ui.py`：Rich 终端输出。
+- `app/streamlit_app.py`：最小本机网络访问 UI，展示回答、source chunks、entity/community 层级结果和 adaptive filtering report。
 
 ### 模型与配置
 
@@ -129,6 +132,7 @@ Query Embedding
 - `build_archrag_index()`：C-HNSW-like layer links。
 - `hierarchical_search()`：top-down multi-level retrieval。
 - `generate_archrag_answer()`：hierarchical search -> adaptive filtering -> final answer。
+- `PaperAssistantService.ask()`：UI / 非 CLI 入口的稳定问答接口，返回 answer、sources、retrieval、filter_reports 和 metadata。
 - `run_evaluation()`：评测并输出 retrieval/debug/report artifacts。
 
 ## 数据产物

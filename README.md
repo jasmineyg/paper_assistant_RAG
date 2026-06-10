@@ -16,6 +16,7 @@
 - **连续追问**：使用 SQLite 保存多轮会话历史，支持“它的方法流程是什么？”这类依赖上下文的问题；历史只用于问题改写，不替代本轮检索证据。
 - **评测报告**：内置 `eval` 命令，可统计 paper hit、chunk/evidence hit、MRR、answer present、citation present 等指标，并输出 JSON、CSV、Markdown review 和 JSONL review 文件。
 - **多模型配置**：支持 SiliconFlow、OpenAI-compatible API、DeepSeek chat 和本地 Ollama，可分别配置 chat 与 embedding 服务。
+- **本机网页演示 UI**：提供最小 Streamlit 页面，可在浏览器中提问、查看回答、source chunks、层级检索结果和 adaptive filtering report。
 
 ## 适合解决的问题
 
@@ -100,6 +101,26 @@ uv run python main.py ask "MI-GNN 这篇论文主要解决什么问题？"
 ```
 
 如果索引不存在，`ask` 会自动先构建索引。第一次运行通常较慢，因为需要读取 PDF、切分文本并调用 embedding API；索引构建完成后，后续提问会直接加载本地 FAISS 索引。
+
+启动浏览器 UI：
+
+```powershell
+uv run streamlit run app/streamlit_app.py
+```
+
+默认访问地址是 `http://localhost:8501`。UI 侧边栏会显示知识库路径、FAISS / ArchRAG / KG 索引状态、当前检索模式和不含 API Key 的模型配置摘要。页面当前支持 `ArchRAG` 和 `Baseline Hybrid RAG` 两种模式；重新构建索引按钮会按当前模式调用对应构建流程。
+
+如果需要让同一局域网内其他设备访问：
+
+```powershell
+uv run streamlit run app/streamlit_app.py --server.address 0.0.0.0 --server.port 8501
+```
+
+然后在其他设备浏览器访问 `http://<本机局域网IP>:8501`。Windows 上可用下面命令查看本机 IPv4 地址：
+
+```powershell
+Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -notlike "169.254*"} | Select-Object IPAddress,InterfaceAlias
+```
 
 ## 常用命令
 
@@ -375,6 +396,7 @@ paper_assistant_rag/
   archrag_hierarchy.py          层级 attributed community 构建
   archrag_index.py              Python C-HNSW-like 索引与 top-down search
   archrag_generation.py         adaptive filtering 与最终答案合并
+  service.py                    Streamlit / 非 CLI 入口复用的问答服务封装
   qa.py                         带会话记忆的 RAG 问答主流程
   memory.py                     SQLite 对话历史
   evaluation.py                 paper / chunk / citation 评测与报告
@@ -382,11 +404,13 @@ paper_assistant_rag/
   models.py                     LLM / embedding 模型工厂
   ui.py                         Rich 终端输出和来源表格
   paths.py                      默认目录和路径配置
+app/
+  streamlit_app.py              本机浏览器访问的最小 Streamlit UI
 ```
 
 ## 当前边界
 
-- 当前版本以命令行交互为主，尚未提供 Web UI。
+- Streamlit UI 只做本机和局域网演示，不包含登录、上传文件、多用户隔离或权限管理。
 - PDF 文本抽取质量依赖原始论文格式；扫描版 PDF 需要额外 OCR 支持。
 - KG 和 community 质量依赖 LLM 抽取、embedding 模型和论文 chunk 质量。
 - `archrag` 是对 ArchRAG 思想的工程化近似，不是论文原实现的完全复现。
