@@ -268,6 +268,7 @@ def _source_rows_from_points(points: list[dict[str, Any]]) -> list[dict[str, str
     rows: list[dict[str, str]] = []
     seen: set[str] = set()
     for point in points:
+        score = float(point.get("score", 0.0))
         for ref in point.get("source_refs", []):
             stable_id = str(ref.get("stable_chunk_id", "")).strip()
             fallback_key = "|".join(
@@ -288,6 +289,7 @@ def _source_rows_from_points(points: list[dict[str, Any]]) -> list[dict[str, str
                     "source": str(ref.get("source", "unknown")),
                     "page": str(ref.get("page", "?")),
                     "chunk": str(ref.get("chunk_id", "?")),
+                    "score": f"{score:.1f}",
                     "snippet": str(ref.get("snippet", "") or stable_id),
                 }
             )
