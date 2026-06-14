@@ -15,8 +15,8 @@ from openai import OpenAIError
 from rich.table import Table
 
 from paper_assistant_rag.archrag_gated import retrieve_archrag_gated_chunks_with_score
-from paper_assistant_rag.archrag_generation import archrag_level_results_to_documents, generate_archrag_answer
-from paper_assistant_rag.archrag_index import hierarchical_search, load_archrag_index
+from paper_assistant_rag.archrag_generation import generate_archrag_answer, rerank_archrag_chunks
+from paper_assistant_rag.archrag_index import hierarchical_search_by_embedding, load_archrag_index
 from paper_assistant_rag.community_retrieval import retrieve_community_augmented_chunks_with_score
 from paper_assistant_rag.graph_retrieval import retrieve_graph_chunks_with_score
 from paper_assistant_rag.indexing import load_index
@@ -71,6 +71,8 @@ def run_evaluation(
     mode = normalize_retrieval_mode(retrieval_mode)
     with console.status("[cyan]Loading FAISS index...[/cyan]", spinner="dots"):
         vectorstore = load_index(index_dir, settings)
+    arch_index = load_archrag_index(archrag_dir) if mode == "archrag" else None
+    archrag_embeddings = build_embeddings(settings) if mode == "archrag" else None
 
     answer_chain = None
     if with_answers:
@@ -113,6 +115,8 @@ def run_evaluation(
         graph_dir=graph_dir,
         community_index_dir=community_index_dir,
         archrag_dir=archrag_dir,
+        arch_index=arch_index,
+        archrag_embeddings=archrag_embeddings,
         community_k=community_k,
         candidate_papers=candidate_papers,
         per_paper_k=per_paper_k,
@@ -173,6 +177,8 @@ def _evaluate_items(
     graph_dir: Path,
     community_index_dir: Path,
     archrag_dir: Path,
+    arch_index,
+    archrag_embeddings,
     community_k: int,
     candidate_papers: int,
     per_paper_k: int,
@@ -198,6 +204,8 @@ def _evaluate_items(
             graph_dir=graph_dir,
             community_index_dir=community_index_dir,
             archrag_dir=archrag_dir,
+            arch_index=arch_index,
+            archrag_embeddings=archrag_embeddings,
             community_k=community_k,
             candidate_papers=candidate_papers,
             per_paper_k=per_paper_k,
@@ -236,6 +244,8 @@ def _evaluate_items(
                     graph_dir,
                     community_index_dir,
                     archrag_dir,
+                    arch_index,
+                    archrag_embeddings,
                     community_k,
                     candidate_papers,
                     per_paper_k,
@@ -270,6 +280,8 @@ def _evaluate_items(
             graph_dir=graph_dir,
             community_index_dir=community_index_dir,
             archrag_dir=archrag_dir,
+            arch_index=arch_index,
+            archrag_embeddings=archrag_embeddings,
             community_k=community_k,
             candidate_papers=candidate_papers,
             per_paper_k=per_paper_k,
@@ -294,6 +306,8 @@ def _evaluate_items_sequentially(
     graph_dir: Path,
     community_index_dir: Path,
     archrag_dir: Path,
+    arch_index,
+    archrag_embeddings,
     community_k: int,
     candidate_papers: int,
     per_paper_k: int,
@@ -318,6 +332,8 @@ def _evaluate_items_sequentially(
                 graph_dir=graph_dir,
                 community_index_dir=community_index_dir,
                 archrag_dir=archrag_dir,
+                arch_index=arch_index,
+                archrag_embeddings=archrag_embeddings,
                 community_k=community_k,
                 candidate_papers=candidate_papers,
                 per_paper_k=per_paper_k,
@@ -341,6 +357,8 @@ def _evaluate_items_sequentially(
                 graph_dir=graph_dir,
                 community_index_dir=community_index_dir,
                 archrag_dir=archrag_dir,
+                arch_index=arch_index,
+                archrag_embeddings=archrag_embeddings,
                 community_k=community_k,
                 candidate_papers=candidate_papers,
                 per_paper_k=per_paper_k,
@@ -384,6 +402,8 @@ def _evaluate_single_turn_item(
     graph_dir: Path,
     community_index_dir: Path,
     archrag_dir: Path,
+    arch_index,
+    archrag_embeddings,
     community_k: int,
     candidate_papers: int,
     per_paper_k: int,
@@ -400,6 +420,8 @@ def _evaluate_single_turn_item(
         graph_dir=graph_dir,
         community_index_dir=community_index_dir,
         archrag_dir=archrag_dir,
+        arch_index=arch_index,
+        archrag_embeddings=archrag_embeddings,
         community_k=community_k,
         candidate_papers=candidate_papers,
         per_paper_k=per_paper_k,
@@ -427,7 +449,10 @@ def _evaluate_single_turn_item(
         row.update(
             _answer_archrag_item(
                 query=query,
-                archrag_dir=archrag_dir,
+                vectorstore=vectorstore,
+                arch_index=arch_index,
+                embeddings=archrag_embeddings,
+                final_chunk_limit=k,
                 top_k_per_level=top_k_per_level,
                 max_levels=max_levels,
             )
@@ -459,6 +484,8 @@ def _evaluate_multi_turn_item(
     graph_dir: Path,
     community_index_dir: Path,
     archrag_dir: Path,
+    arch_index,
+    archrag_embeddings,
     community_k: int,
     candidate_papers: int,
     per_paper_k: int,
@@ -488,6 +515,8 @@ def _evaluate_multi_turn_item(
                 graph_dir=graph_dir,
                 community_index_dir=community_index_dir,
                 archrag_dir=archrag_dir,
+                arch_index=arch_index,
+                archrag_embeddings=archrag_embeddings,
                 community_k=community_k,
                 candidate_papers=candidate_papers,
                 per_paper_k=per_paper_k,
@@ -547,6 +576,8 @@ def _retrieve_rows(
     graph_dir: Path,
     community_index_dir: Path,
     archrag_dir: Path,
+    arch_index,
+    archrag_embeddings,
     community_k: int,
     candidate_papers: int,
     per_paper_k: int,
@@ -565,17 +596,23 @@ def _retrieve_rows(
             graph_dir=graph_dir,
         )
     elif mode == "archrag":
-        settings = Settings.from_env()
-        arch_index = load_archrag_index(archrag_dir)
-        search_result = hierarchical_search(
+        if arch_index is None or archrag_embeddings is None:
+            settings = Settings.from_env()
+            arch_index = load_archrag_index(archrag_dir)
+            archrag_embeddings = build_embeddings(settings)
+        query_embedding = [float(value) for value in archrag_embeddings.embed_query(query)]
+        search_result = hierarchical_search_by_embedding(
             arch_index=arch_index,
+            query_embedding=query_embedding,
             query=query,
-            embeddings=build_embeddings(settings),
             top_k_per_level=top_k_per_level,
             max_levels=max_levels,
         )
         archrag_debug = {
             "path": search_result.get("path", []),
+            "beam_trace": search_result.get("beam_trace", {}),
+            "candidate_counts": search_result.get("candidate_counts", {}),
+            "fallback_levels": search_result.get("fallback_levels", []),
             "level_results": {
                 str(level): [
                     {
@@ -583,16 +620,23 @@ def _retrieve_rows(
                         "node_type": str(node.get("node_type", "")),
                         "name": str(node.get("name", "")),
                         "score": float(node.get("score", 0.0)),
-                        "source_chunks": list(node.get("source_chunks", [])),
+                        "local_score": float(node.get("local_score", node.get("score", 0.0))),
+                        "parent_node_ids": list(node.get("parent_node_ids", [])),
+                        "source_chunk_count": len(node.get("source_chunks", [])),
+                        "source_chunks": list(node.get("source_chunks", []))[:30],
                     }
                     for node in nodes
                 ]
                 for level, nodes in search_result.get("level_results", {}).items()
             },
         }
-        selected_results = archrag_level_results_to_documents(
-            search_result["level_results"],
+        selected_results = rerank_archrag_chunks(
+            query=query,
+            level_results=search_result["level_results"],
+            vectorstore=vectorstore,
+            embeddings=archrag_embeddings,
             limit=k,
+            query_embedding=query_embedding,
         )
     elif mode == "archrag-lite":
         selected_results = retrieve_community_augmented_chunks_with_score(
@@ -646,6 +690,8 @@ def _retrieve_rows(
                 "archrag_node_name": str(metadata.get("archrag_node_name", "")),
                 "archrag_node_type": str(metadata.get("archrag_node_type", "")),
                 "archrag_node_score": str(metadata.get("archrag_node_score", "")),
+                "chunk_semantic_score": str(metadata.get("chunk_semantic_score", "")),
+                "chunk_keyword_score": str(metadata.get("chunk_keyword_score", "")),
                 "adaptive_filter_score": str(metadata.get("chunk_relevance_score") or metadata.get("archrag_node_score", "")),
                 "query_type": str(metadata.get("query_type", "")),
                 "candidate_paper": str(metadata.get("candidate_paper", "")),
@@ -674,37 +720,26 @@ def _score_retrieval(
         for paper_id in item.get("target_papers", [])
         if paper_id in paper_sources
     }
-    retrieved_keys = [_row_key(row) for row in retrieved_rows]
     retrieved_sources = [str(row["source"]) for row in retrieved_rows]
 
     if not target_sources and not evidence_keys:
         return {
             "target_paper_hit": None,
             "all_target_papers_hit": None,
-            "exact_evidence_hit": None,
             "evidence_hit": None,
             "target_paper_recall": None,
             "evidence_recall": None,
-            "exact_evidence_recall": None,
             "first_target_paper_rank": None,
             "first_evidence_rank": None,
-            "first_exact_evidence_rank": None,
             "mrr_target_paper": None,
             "mrr_evidence": None,
-            "mrr_exact_evidence": None,
             "target_sources": [],
             "retrieved_target_sources": [],
             "expected_evidence_count": 0,
             "retrieved_evidence_count": 0,
-            "retrieved_exact_evidence_count": 0,
             "expected_no_answer": True,
         }
 
-    exact_evidence_ranks = [
-        rank
-        for rank, key in enumerate(retrieved_keys, start=1)
-        if key in evidence_keys
-    ]
     evidence_matches = _matched_evidence(evidence, retrieved_rows)
     evidence_ranks = [rank for rank, _key in evidence_matches]
     target_paper_ranks = [
@@ -712,7 +747,6 @@ def _score_retrieval(
         for rank, source in enumerate(retrieved_sources, start=1)
         if source in target_sources
     ]
-    retrieved_exact_evidence = set(retrieved_keys).intersection(evidence_keys)
     retrieved_evidence = {key for _rank, key in evidence_matches}
     retrieved_target_sources = set(retrieved_sources).intersection(target_sources)
 
@@ -721,22 +755,17 @@ def _score_retrieval(
         "all_target_papers_hit": target_sources.issubset(retrieved_target_sources)
         if target_sources
         else False,
-        "exact_evidence_hit": bool(exact_evidence_ranks),
         "evidence_hit": bool(evidence_ranks),
         "target_paper_recall": _safe_ratio(len(retrieved_target_sources), len(target_sources)),
         "evidence_recall": _safe_ratio(len(retrieved_evidence), len(evidence_keys)),
-        "exact_evidence_recall": _safe_ratio(len(retrieved_exact_evidence), len(evidence_keys)),
         "first_target_paper_rank": min(target_paper_ranks) if target_paper_ranks else None,
         "first_evidence_rank": min(evidence_ranks) if evidence_ranks else None,
-        "first_exact_evidence_rank": min(exact_evidence_ranks) if exact_evidence_ranks else None,
         "mrr_target_paper": 1.0 / min(target_paper_ranks) if target_paper_ranks else 0.0,
         "mrr_evidence": 1.0 / min(evidence_ranks) if evidence_ranks else 0.0,
-        "mrr_exact_evidence": 1.0 / min(exact_evidence_ranks) if exact_evidence_ranks else 0.0,
         "target_sources": sorted(target_sources),
         "retrieved_target_sources": sorted(retrieved_target_sources),
         "expected_evidence_count": len(evidence_keys),
         "retrieved_evidence_count": len(retrieved_evidence),
-        "retrieved_exact_evidence_count": len(retrieved_exact_evidence),
     }
 
 
@@ -784,7 +813,10 @@ def _answer_item(
 
 def _answer_archrag_item(
     query: str,
-    archrag_dir: Path,
+    vectorstore,
+    arch_index,
+    embeddings,
+    final_chunk_limit: int,
     top_k_per_level: int,
     max_levels: int | None,
 ) -> dict[str, Any]:
@@ -793,11 +825,13 @@ def _answer_archrag_item(
     try:
         result = generate_archrag_answer(
             query=query,
-            arch_index=load_archrag_index(archrag_dir),
+            arch_index=arch_index,
             llm=build_llm(settings),
-            embeddings=build_embeddings(settings),
+            embeddings=embeddings,
+            vectorstore=vectorstore,
             top_k_per_level=top_k_per_level,
             max_levels=max_levels,
+            final_chunk_limit=final_chunk_limit,
         )
     except (OpenAIError, HTTPError) as exc:
         return {
@@ -843,14 +877,10 @@ def _summarize(
         "all_target_papers_hit_rate": _mean_bool(retrieval_metrics, "all_target_papers_hit"),
         "evidence_hit_rate": _mean_bool(retrieval_metrics, "evidence_hit"),
         "source_hit@k": _mean_bool(retrieval_metrics, "evidence_hit"),
-        "exact_evidence_hit_rate": _mean_bool(retrieval_metrics, "exact_evidence_hit"),
-        "chunk_hit@k": _mean_bool(retrieval_metrics, "exact_evidence_hit"),
         "avg_target_paper_recall": _mean_float(retrieval_metrics, "target_paper_recall"),
         "avg_evidence_recall": _mean_float(retrieval_metrics, "evidence_recall"),
-        "avg_exact_evidence_recall": _mean_float(retrieval_metrics, "exact_evidence_recall"),
         "mrr_target_paper": _mean_float(retrieval_metrics, "mrr_target_paper"),
         "mrr_evidence": _mean_float(retrieval_metrics, "mrr_evidence"),
-        "mrr_exact_evidence": _mean_float(retrieval_metrics, "mrr_exact_evidence"),
     }
     if with_answers:
         answer_metrics = [row.get("answer_metrics", {}) for row in scored_rows]
@@ -883,16 +913,12 @@ def _write_csv(csv_path: Path, rows: list[dict[str, Any]]) -> None:
         "target_paper_hit",
         "all_target_papers_hit",
         "evidence_hit",
-        "exact_evidence_hit",
         "target_paper_recall",
         "evidence_recall",
-        "exact_evidence_recall",
         "first_target_paper_rank",
         "first_evidence_rank",
-        "first_exact_evidence_rank",
         "mrr_target_paper",
         "mrr_evidence",
-        "mrr_exact_evidence",
         "citation_present",
         "answer_length",
         "retrieved_sources",
@@ -914,16 +940,12 @@ def _write_csv(csv_path: Path, rows: list[dict[str, Any]]) -> None:
                     "target_paper_hit": metrics["target_paper_hit"],
                     "all_target_papers_hit": metrics["all_target_papers_hit"],
                     "evidence_hit": metrics["evidence_hit"],
-                    "exact_evidence_hit": metrics["exact_evidence_hit"],
                     "target_paper_recall": metrics["target_paper_recall"],
                     "evidence_recall": metrics["evidence_recall"],
-                    "exact_evidence_recall": metrics["exact_evidence_recall"],
                     "first_target_paper_rank": metrics["first_target_paper_rank"],
                     "first_evidence_rank": metrics["first_evidence_rank"],
-                    "first_exact_evidence_rank": metrics["first_exact_evidence_rank"],
                     "mrr_target_paper": metrics["mrr_target_paper"],
                     "mrr_evidence": metrics["mrr_evidence"],
-                    "mrr_exact_evidence": metrics["mrr_exact_evidence"],
                     "citation_present": answer_metrics.get("citation_present"),
                     "answer_length": answer_metrics.get("answer_length"),
                     "retrieved_sources": " | ".join(
@@ -1027,12 +1049,9 @@ def _review_item_markdown(row: dict[str, Any], heading: str) -> list[str]:
         f"- target paper hit: `{metrics['target_paper_hit']}`",
         f"- all target papers hit: `{metrics['all_target_papers_hit']}`",
         f"- evidence hit: `{metrics.get('evidence_hit')}`",
-        f"- exact chunk-id hit: `{metrics['exact_evidence_hit']}`",
         f"- target paper recall: `{_format_metric(metrics['target_paper_recall'])}`",
         f"- evidence recall: `{_format_metric(metrics['evidence_recall'])}`",
-        f"- exact chunk-id recall: `{_format_metric(metrics.get('exact_evidence_recall'))}`",
         f"- first evidence rank: `{metrics['first_evidence_rank']}`",
-        f"- first exact chunk-id rank: `{metrics.get('first_exact_evidence_rank')}`",
         "",
         "**Model answer:**",
         "",
@@ -1222,9 +1241,6 @@ def _matched_evidence(
 
 
 def _evidence_matches_row(evidence: dict[str, Any], row: dict[str, Any]) -> bool:
-    if _row_key(row) == _evidence_key(evidence):
-        return True
-
     evidence_stable_id = str(evidence.get("stable_chunk_id", "")).strip()
     row_stable_id = str(row.get("stable_chunk_id", "")).strip()
     if evidence_stable_id and row_stable_id and evidence_stable_id == row_stable_id:
@@ -1245,11 +1261,8 @@ def _evidence_matches_row(evidence: dict[str, Any], row: dict[str, Any]) -> bool
 
 def _retrieved_match_label(evidence_items: list[dict[str, Any]], row: dict[str, Any]) -> str:
     for evidence in evidence_items:
-        if _row_key(row) == _evidence_key(evidence):
-            return "exact"
-    for evidence in evidence_items:
         if _evidence_matches_row(evidence, row):
-            return "terms"
+            return "evidence"
     return ""
 
 
@@ -1269,14 +1282,6 @@ def _evidence_key(evidence: dict[str, Any]) -> tuple[str, str, str]:
         str(evidence.get("source", "")),
         str(evidence.get("page", "")),
         str(evidence.get("chunk_id", "")),
-    )
-
-
-def _row_key(row: dict[str, Any]) -> tuple[str, str, str]:
-    return (
-        str(row.get("source", "")),
-        str(row.get("page", "")),
-        str(row.get("chunk_id", "")),
     )
 
 

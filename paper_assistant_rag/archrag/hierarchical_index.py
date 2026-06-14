@@ -5,7 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from paper_assistant_rag.archrag_index import build_archrag_index, hierarchical_search, load_archrag_index
+from paper_assistant_rag.archrag_index import (
+    build_archrag_index,
+    hierarchical_search,
+    hierarchical_search_by_embedding,
+    load_archrag_index,
+)
 from paper_assistant_rag.archrag_types import ArchIndex
 
 
@@ -27,21 +32,15 @@ class HierarchicalIndex:
 
     def search(self, query_embedding: list[float], top_k_per_level: int) -> dict[str, list[dict[str, Any]]]:
         """Search each level using an already-computed query embedding."""
-        from paper_assistant_rag.archrag_index import search_layer
-
-        results: dict[str, list[dict[str, Any]]] = {}
-        current_start = self.index.entry_node_id
-        for level in sorted(self.index.layers, reverse=True):
-            level_results = search_layer(
-                layer=self.index.layers[level],
-                query_embedding=query_embedding,
-                start_node_id=current_start,
-                top_k=top_k_per_level,
-            )
-            results[f"level_{level}"] = level_results
-            if level_results:
-                current_start = self.index.inter_links.get(str(level_results[0]["node_id"]))
-        return results
+        search_result = hierarchical_search_by_embedding(
+            arch_index=self.index,
+            query_embedding=query_embedding,
+            top_k_per_level=top_k_per_level,
+        )
+        return {
+            f"level_{level}": rows
+            for level, rows in search_result["level_results"].items()
+        }
 
     def search_text(self, query: str, embeddings, top_k_per_level: int, max_levels: int | None = None) -> dict[str, Any]:
         """Embed a query and run top-down hierarchical search."""

@@ -116,6 +116,7 @@ class PaperAssistantService:
         if mode == "archrag":
             result = self._ask_archrag(
                 question=question,
+                k=k,
                 top_k_per_level=top_k_per_level,
                 max_levels=max_levels,
             )
@@ -138,21 +139,25 @@ class PaperAssistantService:
     def _ask_archrag(
         self,
         question: str,
+        k: int,
         top_k_per_level: int,
         max_levels: int | None,
     ) -> dict[str, Any]:
-        if not self._archrag_index_exists():
+        if not self._archrag_index_exists() or not index_exists(self.index_dir):
             self.build_index(force=False, retrieval_mode="archrag")
 
         settings = Settings.from_env()
         arch_index = load_archrag_index(self.archrag_dir)
+        embeddings = build_embeddings(settings)
         result = generate_archrag_answer(
             query=question,
             arch_index=arch_index,
             llm=build_llm(settings),
-            embeddings=build_embeddings(settings),
+            embeddings=embeddings,
+            vectorstore=load_index(self.index_dir, settings),
             top_k_per_level=top_k_per_level,
             max_levels=max_levels,
+            final_chunk_limit=k,
         )
         debug_info = result.get("debug_info", {})
         level_results = _level_results(debug_info)
@@ -319,4 +324,3 @@ def _embedding_model(settings: Settings) -> str:
     if settings.embedding_provider == "ollama":
         return settings.ollama_embed_model
     return settings.openai_embed_model
-

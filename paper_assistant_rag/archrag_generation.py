@@ -6,11 +6,18 @@ import json
 import re
 from typing import Any
 
+import numpy as np
 from langchain_core.documents import Document
 
-from paper_assistant_rag.archrag_index import hierarchical_search
+from paper_assistant_rag.archrag_index import hierarchical_search_by_embedding
 from paper_assistant_rag.archrag_types import ArchIndex
 from paper_assistant_rag.retrieval import clean_model_output, normalize_text
+
+CHUNK_SEMANTIC_WEIGHT = 0.65
+HIERARCHY_NODE_WEIGHT = 0.25
+KEYWORD_WEIGHT = 0.10
+DEFAULT_MAX_CHUNKS_PER_NODE = 3
+DEFAULT_MAX_CHUNKS_PER_PAPER = 6
 
 
 def adaptive_filter_level_results(
@@ -69,10 +76,11 @@ def merge_filtered_reports(
     reports: list[dict[str, Any]],
     llm,
     response_format: str = "Chinese answer with [S#] citations",
+    source_rows_override: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Merge filtered hierarchy reports into a final cited answer."""
     points = _rank_points(reports)
-    source_rows = _source_rows_from_points(points)
+    source_rows = source_rows_override if source_rows_override is not None else _source_rows_from_points(points)
     prompt = f"""
 You are an academic-paper RAG assistant.
 Answer only from the filtered ArchRAG evidence below. Do not invent facts.
@@ -108,17 +116,36 @@ def generate_archrag_answer(
     arch_index: ArchIndex,
     llm,
     embeddings,
+    vectorstore=None,
     top_k_per_level: int = 5,
     max_levels: int | None = None,
+    final_chunk_limit: int = 10,
 ) -> dict[str, Any]:
     """Run hierarchical search, adaptive filtering, and final answer merging."""
-    search_result = hierarchical_search(
+    query_embedding = [float(value) for value in embeddings.embed_query(query)]
+    search_result = hierarchical_search_by_embedding(
         arch_index=arch_index,
+        query_embedding=query_embedding,
         query=query,
-        embeddings=embeddings,
         top_k_per_level=top_k_per_level,
         max_levels=max_levels,
     )
+    reranked_documents = (
+        rerank_archrag_chunks(
+            query=query,
+            level_results=search_result["level_results"],
+            vectorstore=vectorstore,
+            embeddings=embeddings,
+            limit=final_chunk_limit,
+            query_embedding=query_embedding,
+        )
+        if vectorstore is not None
+        else archrag_level_results_to_documents(
+            search_result["level_results"],
+            limit=final_chunk_limit,
+        )
+    )
+    source_rows = _source_rows_from_ranked_documents(reranked_documents)
     reports = adaptive_filter_level_results(
         query=query,
         level_results=search_result["level_results"],
@@ -129,6 +156,7 @@ def generate_archrag_answer(
         reports=reports,
         llm=llm,
         response_format="Structured Chinese answer with explicit [S#] citations",
+        source_rows_override=source_rows,
     )
     return {
         "answer": merged["answer"],
@@ -184,6 +212,98 @@ def archrag_level_results_to_documents(
         if len(deduped) >= limit:
             break
     return deduped
+
+
+def rerank_archrag_chunks(
+    query: str,
+    level_results: dict[int, list[dict[str, Any]]],
+    vectorstore,
+    embeddings,
+    limit: int,
+    semantic_weight: float = CHUNK_SEMANTIC_WEIGHT,
+    hierarchy_weight: float = HIERARCHY_NODE_WEIGHT,
+    keyword_weight: float = KEYWORD_WEIGHT,
+    max_chunks_per_node: int = DEFAULT_MAX_CHUNKS_PER_NODE,
+    max_chunks_per_paper: int = DEFAULT_MAX_CHUNKS_PER_PAPER,
+    query_embedding: list[float] | np.ndarray | None = None,
+) -> list[tuple[Document, float]]:
+    """Rerank source chunks using query semantics, hierarchy score, and keywords."""
+    if limit <= 0:
+        return []
+    chunk_lookup = _vectorstore_chunk_lookup(vectorstore)
+    if not chunk_lookup:
+        return archrag_level_results_to_documents(level_results, limit=limit)
+
+    query_embedding = np.asarray(
+        embeddings.embed_query(query) if query_embedding is None else query_embedding,
+        dtype=np.float32,
+    )
+    query_terms = _query_terms(query)
+    candidates: dict[str, dict[str, Any]] = {}
+    for level in sorted(level_results, reverse=True):
+        for node in level_results[level]:
+            node_score = float(node.get("route_score", node.get("score", 0.0)))
+            node_score_01 = _cosine_to_unit_interval(node_score)
+            for ref in _node_source_refs(node):
+                stable_id = str(ref.get("stable_chunk_id", "")).strip()
+                stored = chunk_lookup.get(stable_id)
+                if stored is None:
+                    continue
+                previous = candidates.get(stable_id)
+                if previous is not None and float(previous["node_score_01"]) >= node_score_01:
+                    continue
+                candidates[stable_id] = {
+                    "stable_id": stable_id,
+                    "document": stored["document"],
+                    "position": stored["position"],
+                    "node": node,
+                    "level": level,
+                    "node_score": node_score,
+                    "node_score_01": node_score_01,
+                }
+
+    ranked: list[tuple[Document, float]] = []
+    for candidate in candidates.values():
+        document = candidate["document"]
+        chunk_vector = _reconstruct_vector(vectorstore, int(candidate["position"]))
+        semantic_score = _cosine_dense(query_embedding, chunk_vector)
+        semantic_score_01 = _cosine_to_unit_interval(semantic_score)
+        keyword_score = _keyword_relevance(query_terms, document.page_content)
+        final_score = (
+            semantic_weight * semantic_score_01
+            + hierarchy_weight * float(candidate["node_score_01"])
+            + keyword_weight * keyword_score
+        )
+        node = candidate["node"]
+        metadata = dict(document.metadata)
+        metadata.update(
+            {
+                "archrag_level": str(candidate["level"]),
+                "archrag_node_id": str(node.get("node_id", "")),
+                "archrag_node_name": str(node.get("name", "")),
+                "archrag_node_type": str(node.get("node_type", "")),
+                "archrag_node_score": f"{float(candidate['node_score']):.6f}",
+                "chunk_semantic_score": f"{semantic_score:.6f}",
+                "chunk_keyword_score": f"{keyword_score:.6f}",
+                "chunk_relevance_score": f"{final_score:.6f}",
+                "community_id": str(node.get("node_id", "")),
+            }
+        )
+        ranked.append((Document(page_content=document.page_content, metadata=metadata), final_score))
+
+    ranked.sort(
+        key=lambda item: (
+            -item[1],
+            str(item[0].metadata.get("source", "")),
+            str(item[0].metadata.get("stable_chunk_id", "")),
+        )
+    )
+    return _apply_chunk_quotas(
+        ranked,
+        limit=limit,
+        max_chunks_per_node=max_chunks_per_node,
+        max_chunks_per_paper=max_chunks_per_paper,
+    )
 
 
 def _level_evidence_text(evidence_lookup: dict[str, dict[str, Any]]) -> str:
@@ -302,6 +422,27 @@ def _source_rows_from_points(points: list[dict[str, Any]]) -> list[dict[str, str
     return rows
 
 
+def _source_rows_from_ranked_documents(
+    ranked_documents: list[tuple[Document, float]],
+) -> list[dict[str, str]]:
+    """Build final answer citations from query-reranked real chunk documents."""
+    rows: list[dict[str, str]] = []
+    for index, (document, score) in enumerate(ranked_documents, start=1):
+        metadata = document.metadata
+        rows.append(
+            {
+                "id": f"S{index}",
+                "stable_chunk_id": str(metadata.get("stable_chunk_id", "")),
+                "source": str(metadata.get("source", "unknown")),
+                "page": str(metadata.get("page", "?")),
+                "chunk": str(metadata.get("chunk_id", "?")),
+                "score": f"{float(score):.4f}",
+                "snippet": normalize_text(document.page_content)[:1600],
+            }
+        )
+    return rows
+
+
 def _node_source_refs(node: dict[str, Any]) -> list[dict[str, str]]:
     """Extract source chunk references from a hierarchy node result."""
     metadata = node.get("metadata", {})
@@ -330,8 +471,114 @@ def _node_source_refs(node: dict[str, Any]) -> list[dict[str, str]]:
             "chunk_id": str(chunk_id),
             "snippet": str(chunk_id),
         }
-        for chunk_id in node.get("source_chunks", [])[:12]
+        for chunk_id in node.get("source_chunks", [])
     ]
+
+
+def _vectorstore_chunk_lookup(vectorstore) -> dict[str, dict[str, Any]]:
+    """Map stable chunk ids to their stored documents and FAISS positions."""
+    docstore = getattr(getattr(vectorstore, "docstore", None), "_dict", {})
+    position_to_doc_id = getattr(vectorstore, "index_to_docstore_id", {})
+    if not isinstance(docstore, dict) or not isinstance(position_to_doc_id, dict):
+        return {}
+    lookup: dict[str, dict[str, Any]] = {}
+    for position, doc_id in position_to_doc_id.items():
+        document = docstore.get(doc_id)
+        if not isinstance(document, Document):
+            continue
+        stable_id = str(document.metadata.get("stable_chunk_id", "")).strip()
+        if stable_id:
+            lookup[stable_id] = {"document": document, "position": int(position)}
+    return lookup
+
+
+def _reconstruct_vector(vectorstore, position: int) -> np.ndarray:
+    """Read one stored FAISS vector for exact query-to-chunk cosine scoring."""
+    try:
+        return np.asarray(vectorstore.index.reconstruct(position), dtype=np.float32)
+    except Exception:
+        return np.empty(0, dtype=np.float32)
+
+
+def _cosine_dense(left: np.ndarray, right: np.ndarray) -> float:
+    """Return cosine similarity for dense vectors, or zero for invalid rows."""
+    if left.ndim != 1 or right.ndim != 1 or left.size == 0 or left.size != right.size:
+        return 0.0
+    denominator = float(np.linalg.norm(left) * np.linalg.norm(right))
+    if denominator == 0.0 or not np.isfinite(denominator):
+        return 0.0
+    return float(left @ right) / denominator
+
+
+def _cosine_to_unit_interval(score: float) -> float:
+    """Map cosine similarity from [-1, 1] into [0, 1]."""
+    return max(0.0, min(1.0, (float(score) + 1.0) / 2.0))
+
+
+def _query_terms(query: str) -> list[str]:
+    """Extract Latin tokens and Chinese bigrams for lightweight lexical matching."""
+    normalized = normalize_text(query)
+    latin_terms = re.findall(r"[A-Za-z0-9][A-Za-z0-9_+\-]{1,}", normalized)
+    if latin_terms:
+        return list(dict.fromkeys(latin_terms))
+
+    terms: list[str] = []
+    chinese_sequences = re.findall(r"[\u4e00-\u9fff]{2,}", normalized)
+    for sequence in chinese_sequences:
+        terms.extend(sequence[index : index + 2] for index in range(len(sequence) - 1))
+    return list(dict.fromkeys(terms))
+
+
+def _keyword_relevance(query_terms: list[str], text: str) -> float:
+    """Return the fraction of query terms present in the chunk text."""
+    if not query_terms:
+        return 0.0
+    searchable = normalize_text(text)
+    searchable_lower = searchable.lower()
+    score = 0.0
+    for term in query_terms:
+        if term in searchable:
+            score += 1.0
+        elif term.lower() in searchable_lower:
+            score += 0.5
+    return score / len(query_terms)
+
+
+def _apply_chunk_quotas(
+    ranked: list[tuple[Document, float]],
+    limit: int,
+    max_chunks_per_node: int,
+    max_chunks_per_paper: int,
+) -> list[tuple[Document, float]]:
+    """Apply diversity quotas, then relax them only when too few rows survive."""
+    selected: list[tuple[Document, float]] = []
+    selected_ids: set[str] = set()
+    node_counts: dict[str, int] = {}
+    paper_counts: dict[str, int] = {}
+    for document, score in ranked:
+        node_id = str(document.metadata.get("archrag_node_id", ""))
+        paper = str(document.metadata.get("source", "unknown"))
+        if node_counts.get(node_id, 0) >= max(1, max_chunks_per_node):
+            continue
+        if paper_counts.get(paper, 0) >= max(1, max_chunks_per_paper):
+            continue
+        stable_id = str(document.metadata.get("stable_chunk_id", ""))
+        selected.append((document, score))
+        selected_ids.add(stable_id)
+        node_counts[node_id] = node_counts.get(node_id, 0) + 1
+        paper_counts[paper] = paper_counts.get(paper, 0) + 1
+        if len(selected) >= limit:
+            return selected
+
+    for document, score in ranked:
+        stable_id = str(document.metadata.get("stable_chunk_id", ""))
+        if stable_id in selected_ids:
+            continue
+        selected.append((document, score))
+        selected_ids.add(stable_id)
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def _points_text(points: list[dict[str, Any]]) -> str:
@@ -352,7 +599,8 @@ def _sources_text(source_rows: list[dict[str, str]]) -> str:
     if not source_rows:
         return "No concrete source chunks were available."
     return "\n".join(
-        f"[{row['id']}] {row['source']} | page {row['page']} | chunk {row['chunk']} | {row['stable_chunk_id']}"
+        f"[{row['id']}] {row['source']} | page {row['page']} | chunk {row['chunk']} | "
+        f"{row['stable_chunk_id']} | score {row['score']}\n{row.get('snippet', '')}"
         for row in source_rows
     )
 
@@ -404,4 +652,5 @@ __all__ = [
     "merge_filtered_reports",
     "generate_archrag_answer",
     "archrag_level_results_to_documents",
+    "rerank_archrag_chunks",
 ]

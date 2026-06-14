@@ -11,7 +11,7 @@
 - **混合检索**：融合 FAISS 向量相似度和关键词检索，并使用 RRF 排序，兼顾语义问题、论文名、方法名、缩写和专有术语。
 - **GraphRAG 增强检索**：从 chunk 中抽取实体和关系，构建 KG cache，让检索能利用“方法-任务-数据集-指标-结论”等结构化信号。
 - **ArchRAG-like community 检索**：基于知识图谱做 community detection 和 community summary 索引，从论文群组、方法簇和研究主题层面辅助召回。
-- **层级 ArchRAG 检索**：支持层级 attributed community 构建、Python C-HNSW-like 层级索引、从高层社区到低层实体的 top-down search。
+- **层级 ArchRAG 检索**：支持层级 attributed community 构建、Python C-HNSW-like 层级索引、父节点约束的 top-down beam search，以及回到原始 chunk 的 query-aware rerank。
 - **候选论文门控 + 精确 chunk 回查**：`archrag-gated` 模式先用 hybrid / graph / community 找候选论文，再在候选论文内部做 chunk 级检索和 rerank，避免只找到对的论文却引用错的片段。
 - **连续追问**：使用 SQLite 保存多轮会话历史，支持“它的方法流程是什么？”这类依赖上下文的问题；历史只用于问题改写，不替代本轮检索证据。
 - **评测报告**：内置 `eval` 命令，可统计 paper hit、chunk/evidence hit、MRR、answer present、citation present 等指标，并输出 JSON、CSV、Markdown review 和 JSONL review 文件。
@@ -262,7 +262,7 @@ uv run python main.py archrag-build --max-levels 3 --min-nodes-per-level 5 --sim
 uv run python main.py ask "这组论文围绕哪些核心方法簇展开？" --retrieval-mode archrag --top-k-per-level 5 --show-archrag-debug
 ```
 
-`archrag` 模式会从最高层 community 开始向下检索到低层实体，经过 adaptive filtering 后合并生成答案。它更接近 ArchRAG 论文中的层级思想，但当前实现仍是工程近似版本：C-HNSW 是 Python 实现，community detection 使用 NetworkX 的 Louvain / greedy / label propagation，效果依赖 KG 抽取质量、embedding 模型和 LLM。
+`archrag` 模式会从最高层 community 开始，以 beam width 3 沿候选父节点的 children 向下检索到低层实体；随后回到原始 FAISS chunk，按 `0.65 * chunk 语义 + 0.25 * 层级路径 + 0.10 * 关键词` 重排，并限制每个节点最多 3 条、每篇论文最多 6 条，避免单一来源占满证据。完成 adaptive filtering 后再合并生成答案。这些是在线检索逻辑，可直接复用已有索引，不需要重新执行离线构建。当前实现仍是工程近似版本：C-HNSW 是 Python 实现，community detection 使用 NetworkX 的 Louvain / greedy / label propagation，效果依赖 KG 抽取质量、embedding 模型和 LLM。
 
 ## 检索模式怎么选
 
@@ -319,12 +319,13 @@ uv run python main.py eval --retrieval-mode archrag-gated --retrieval-only
 
 - `target_paper_hit_rate`：是否找到了目标论文。
 - `all_target_papers_hit_rate`：多目标论文是否全部命中。
-- `evidence_hit_rate` / `avg_evidence_recall`：是否找到了证据页或证据片段。
-- `exact_evidence_hit_rate` / `chunk_hit@k`：是否命中精确 chunk。
-- `mrr_evidence`：证据 chunk 排名是否靠前。
+- `evidence_hit_rate` / `avg_evidence_recall`：是否在目标论文的目标页中找到了包含关键术语的证据。
+- `mrr_evidence`：第一个有效证据在检索结果中的排名是否靠前。
 - `citation_present_rate`：答案中是否带 `[S#]` 引用。
 
-注意：回答存在和引用格式正确不等于检索质量好。对这个项目来说，paper hit、chunk/evidence hit 和 citation traceability 需要分开看。
+旧测试集中的 `chunk_id` 会在重新切分或重建索引后失效，因此评测不再输出依赖旧 chunk 编号的
+`exact_evidence_*` / `chunk_hit@k` 指标。回答存在和引用格式正确也不等于检索质量好；对这个项目来说，
+paper hit、evidence hit 和 citation traceability 需要分开看。
 
 ## 配置说明
 

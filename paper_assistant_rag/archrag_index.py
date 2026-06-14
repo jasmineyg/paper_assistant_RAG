@@ -11,6 +11,10 @@ import numpy as np
 from paper_assistant_rag.archrag_types import ArchIndex, ArchLayer, ArchNode, load_arch_index, save_arch_index
 from paper_assistant_rag.ui import create_progress
 
+DEFAULT_BEAM_WIDTH = 3
+LOCAL_SCORE_WEIGHT = 0.85
+PARENT_ROUTE_WEIGHT = 0.15
+
 
 def build_archrag_index(
     hierarchy: ArchIndex,
@@ -55,7 +59,7 @@ def search_layer(
     visited: set[str] = set()
     candidates: list[tuple[float, str]] = [(-_score_node(layer.nodes[start], query_embedding), start)]
     best_by_id: dict[str, float] = {}
-    expansions = max(len(layer.nodes), top_k * 8)
+    expansions = min(len(layer.nodes), max(32, top_k * 8))
 
     while candidates and len(visited) < expansions:
         negative_score, node_id = heapq.heappop(candidates)
@@ -84,39 +88,109 @@ def hierarchical_search(
     embeddings,
     top_k_per_level: int = 5,
     max_levels: int | None = None,
+    beam_width: int = DEFAULT_BEAM_WIDTH,
 ) -> dict[str, Any]:
-    """Run top-down hierarchical search from the highest layer to level 0."""
+    """Run parent-constrained top-down beam search from the highest layer."""
+    query_embedding = [float(value) for value in embeddings.embed_query(query)]
+    return hierarchical_search_by_embedding(
+        arch_index=arch_index,
+        query_embedding=query_embedding,
+        query=query,
+        top_k_per_level=top_k_per_level,
+        max_levels=max_levels,
+        beam_width=beam_width,
+    )
+
+
+def hierarchical_search_by_embedding(
+    arch_index: ArchIndex,
+    query_embedding: list[float],
+    top_k_per_level: int = 5,
+    max_levels: int | None = None,
+    beam_width: int = DEFAULT_BEAM_WIDTH,
+    query: str = "",
+) -> dict[str, Any]:
+    """Run parent-constrained beam search with an already-computed query vector."""
     if not arch_index.layers:
         raise ValueError("ArchRAG index is empty. Run `uv run python main.py archrag-build` first.")
-    query_embedding = [float(value) for value in embeddings.embed_query(query)]
     available_levels = sorted(arch_index.layers, reverse=True)
     if max_levels is not None and max_levels > 0:
         min_allowed_level = max(0, max(available_levels) - max_levels + 1)
         available_levels = [level for level in available_levels if level >= min_allowed_level]
-    current_start = arch_index.entry_node_id
     level_results: dict[int, list[dict[str, Any]]] = {}
     path: list[dict[str, Any]] = []
+    beam_trace: dict[int, list[str]] = {}
+    candidate_counts: dict[int, int] = {}
+    fallback_levels: list[int] = []
+    parent_beam: list[dict[str, Any]] = []
+    beam_width = max(1, int(beam_width))
 
-    for level in available_levels:
+    for level_index, level in enumerate(available_levels):
         layer = arch_index.layers[level]
-        results = search_layer(
-            layer=layer,
-            query_embedding=query_embedding,
-            start_node_id=current_start,
-            top_k=top_k_per_level,
-        )
+        if level_index == 0:
+            results = search_layer(
+                layer=layer,
+                query_embedding=query_embedding,
+                start_node_id=arch_index.entry_node_id,
+                top_k=top_k_per_level,
+            )
+            for result in results:
+                result["local_score"] = float(result["score"])
+                result["route_score"] = float(result["score"])
+                result["parent_score"] = None
+                result["parent_node_ids"] = []
+            candidate_counts[level] = len(layer.nodes)
+        else:
+            parent_candidates = _child_candidates(
+                arch_index=arch_index,
+                parent_beam=parent_beam,
+                layer=layer,
+            )
+            candidate_counts[level] = len(parent_candidates)
+            if parent_candidates:
+                results = _rank_child_candidates(
+                    layer=layer,
+                    query_embedding=query_embedding,
+                    parent_candidates=parent_candidates,
+                    top_k=top_k_per_level,
+                )
+            else:
+                fallback_levels.append(level)
+                fallback_start = _fallback_lower_start(arch_index, parent_beam, layer)
+                results = search_layer(
+                    layer=layer,
+                    query_embedding=query_embedding,
+                    start_node_id=fallback_start,
+                    top_k=top_k_per_level,
+                )
+                for result in results:
+                    result["local_score"] = float(result["score"])
+                    result["route_score"] = float(result["score"])
+                    result["parent_score"] = None
+                    result["parent_node_ids"] = []
         level_results[level] = results
         if not results:
-            current_start = None
+            parent_beam = []
+            beam_trace[level] = []
             continue
-        best_node_id = str(results[0]["node_id"])
-        path.append({"level": level, "node_id": best_node_id, "score": results[0]["score"]})
-        current_start = _next_lower_start(arch_index, best_node_id, next_level=level - 1)
+        parent_beam = results[:beam_width]
+        beam_trace[level] = [str(result["node_id"]) for result in parent_beam]
+        path.append(
+            {
+                "level": level,
+                "node_id": str(results[0]["node_id"]),
+                "score": float(results[0]["score"]),
+            }
+        )
 
     return {
         "query": query,
         "level_results": level_results,
         "path": path,
+        "beam_width": beam_width,
+        "beam_trace": beam_trace,
+        "candidate_counts": candidate_counts,
+        "fallback_levels": fallback_levels,
         "query_embedding_dim": len(query_embedding),
     }
 
@@ -317,6 +391,66 @@ def _next_lower_start(index: ArchIndex, node_id: str, next_level: int) -> str | 
     return _central_node(index.layers[next_level].nodes)
 
 
+def _child_candidates(
+    arch_index: ArchIndex,
+    parent_beam: list[dict[str, Any]],
+    layer: ArchLayer,
+) -> dict[str, list[dict[str, Any]]]:
+    """Map eligible lower-layer children to the beam parents that reach them."""
+    candidates: dict[str, list[dict[str, Any]]] = {}
+    for parent_result in parent_beam:
+        parent_id = str(parent_result.get("node_id", ""))
+        parent = arch_index.find_node(parent_id)
+        child_ids = list(parent.children) if parent is not None else []
+        linked = arch_index.inter_links.get(parent_id)
+        if linked:
+            child_ids.append(linked)
+        for child_id in dict.fromkeys(child_ids):
+            if child_id in layer.nodes:
+                candidates.setdefault(child_id, []).append(parent_result)
+    return candidates
+
+
+def _rank_child_candidates(
+    layer: ArchLayer,
+    query_embedding: list[float],
+    parent_candidates: dict[str, list[dict[str, Any]]],
+    top_k: int,
+) -> list[dict[str, Any]]:
+    """Rank only children reachable from the current beam."""
+    ranked: list[dict[str, Any]] = []
+    for child_id, parents in parent_candidates.items():
+        node = layer.nodes[child_id]
+        local_score = _score_node(node, query_embedding)
+        parent_score = max(float(parent.get("route_score", parent.get("score", 0.0))) for parent in parents)
+        route_score = LOCAL_SCORE_WEIGHT * local_score + PARENT_ROUTE_WEIGHT * parent_score
+        result = _node_result(node, route_score)
+        result.update(
+            {
+                "local_score": float(local_score),
+                "route_score": float(route_score),
+                "parent_score": float(parent_score),
+                "parent_node_ids": [str(parent.get("node_id", "")) for parent in parents],
+            }
+        )
+        ranked.append(result)
+    ranked.sort(key=lambda result: (-float(result["score"]), str(result["node_id"])))
+    return ranked[:top_k]
+
+
+def _fallback_lower_start(
+    arch_index: ArchIndex,
+    parent_beam: list[dict[str, Any]],
+    layer: ArchLayer,
+) -> str | None:
+    """Choose a deterministic lower-layer start when hierarchy links are missing."""
+    for parent_result in parent_beam:
+        linked = arch_index.inter_links.get(str(parent_result.get("node_id", "")))
+        if linked in layer.nodes:
+            return linked
+    return _central_node(layer.nodes)
+
+
 def _central_node(nodes: dict[str, ArchNode]) -> str | None:
     """Pick a deterministic fallback entry node for a layer."""
     if not nodes:
@@ -363,5 +497,6 @@ __all__ = [
     "build_archrag_index",
     "search_layer",
     "hierarchical_search",
+    "hierarchical_search_by_embedding",
     "load_archrag_index",
 ]

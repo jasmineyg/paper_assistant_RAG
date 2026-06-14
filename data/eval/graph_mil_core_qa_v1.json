@@ -1,13 +1,13 @@
 {
   "dataset_id": "graph_mil_core_qa_v1",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "language": "zh-CN",
   "purpose": "评估 Paper Assistant RAG 在 graph-based MIL 论文语料上的缩写定位、模糊检索、误召回控制、论文总结、跨论文对比、知识库外拒答和多轮上下文记忆能力。",
   "created_from": {
     "survey_pdf": "D:\\AResearch\\图上的多实例-综述论文\\submit_v3\\Mark_Graph_based_MIL_Survey_Springer_re2.0final.pdf",
     "corpus_dir": "data/paper",
     "index_dir": "vectorstore/faiss_index",
-    "selection_rule": "优先覆盖用户指定核心论文：2009 miGraph/MIGraph、2019 GNN-MIL、2024 RGMIL、2024 DSMIL、2022 BGMIL/BGNN-MIL；补充 Patch-GCN 和 NAGCN 用于测试 GNN-MIL 之后的 WSI 图建模发展。"
+    "selection_rule": "优先覆盖用户指定核心论文：2009 miGraph/MIGraph、2019 GNN for MIL、2024 RGMIL、2024 DSMIL、2022 BGMIL/BGNN-MIL；补充 Patch-GCN 和 NAGCN 用于测试 GNN for MIL 之后的 WSI 图建模发展。"
   },
   "query_design": {
     "question_field": "自然用户问题。刻意使用缩写、别名、大小写、口语化表达和省略上下文，用于真实 RAG 输入。",
@@ -38,9 +38,9 @@
     {
       "paper_id": "p02",
       "source": "Tu 等 - 2019 - Multiple instance learning with graph neural netwo.pdf",
-      "short_name": "GNN-MIL",
+      "short_name": "GNN for MIL",
       "year": 2019,
-      "role": "GNN-MIL foundation",
+      "role": "GNN for MIL foundation",
       "why_core": "用户指定核心论文。将每个 bag 转成图并用 GNN 做端到端 MIL，是后续 GNN-based MIL 对比的基础。"
     },
     {
@@ -65,7 +65,7 @@
       "short_name": "BGMIL/BGNN-MIL",
       "year": 2022,
       "role": "Bayesian bag graph GNN",
-      "why_core": "用户指定核心论文。关注 bag 之间的 graph 以及图结构不确定性，容易和 bag 内部构图的 GNN-MIL 混淆。"
+      "why_core": "用户指定核心论文。关注 bag 之间的 graph 以及图结构不确定性，容易和 bag 内部构图的 GNN for MIL 混淆。"
     },
     {
       "paper_id": "p06",
@@ -73,7 +73,7 @@
       "short_name": "Patch-GCN",
       "year": 2021,
       "role": "WSI spatial graph modeling",
-      "why_core": "补充论文。把 WSI patch 坐标建成 kNN 图，用 GCN 做上下文感知生存预测，代表 GNN-MIL 思路在病理 WSI 中的扩展。"
+      "why_core": "补充论文。把 WSI patch 坐标建成 kNN 图，用 GCN 做上下文感知生存预测，代表 GNN for MIL 思路在病理 WSI 中的扩展。"
     },
     {
       "paper_id": "p07",
@@ -168,14 +168,14 @@
     {
       "id": "gmil-v2-002",
       "type": "single_turn",
-      "category": "abbreviation_entity_linking",
+      "category": "paper_method_identification",
       "difficulty": "medium",
-      "question": "GNN-MIL 指的是哪篇？它的基本流程是什么？",
-      "canonical_question": "定位 Tu 2019 GNN-MIL，并说明 bag-to-graph、GNN message passing、graph aggregation 和分类流程。",
-      "query_style": "natural_abbreviation",
+      "question": "GNN for MIL 指的是哪篇？它的基本流程是什么？",
+      "canonical_question": "定位 Tu 2019 GNN for MIL，并说明 bag-to-graph、GNN message passing、graph aggregation 和分类流程。",
+      "query_style": "natural_method_name",
       "alias_terms": [
-        "GNN-MIL",
-        "MIL-GNN",
+        "GNN for MIL",
+        "Multiple instance learning with graph neural networks",
         "graph neural network MIL",
         "bag graph"
       ],
@@ -230,7 +230,7 @@
         }
       ],
       "negative_checks": [
-        "不要把 GNN-MIL 归到 Zhou 2009 的 graph-kernel 方法。",
+        "不要把 GNN for MIL 归到 Zhou 2009 的 graph-kernel 方法。",
         "不要只回答“用了 GNN”，必须说明 bag 如何变成 graph 以及如何得到 bag 表示。"
       ]
     },
@@ -239,7 +239,7 @@
       "type": "single_turn",
       "category": "abbreviation_entity_linking",
       "difficulty": "medium",
-      "question": "RGMIL 是哪篇的方法？它主要想解决 GNN-MIL 里的什么问题？",
+      "question": "RGMIL 是哪篇的方法？它主要想解决 GNN for MIL 里的什么问题？",
       "canonical_question": "定位 Zhao 2024 RGMIL，并说明它针对 bag graph 边过滤阈值和 GNN 层数需要联合调节的问题。",
       "query_style": "natural_abbreviation",
       "alias_terms": [
@@ -386,7 +386,7 @@
       ],
       "expected_answer_points": [
         "应定位到 Pal 等 2022 Bag Graph: Multiple Instance Learning Using Bayesian Graph Neural Networks。",
-        "这篇的关键不是像 GNN-MIL 那样只把一个 bag 内的 instances 连成图。",
+        "这篇的关键不是像 GNN for MIL 那样只把一个 bag 内的 instances 连成图。",
         "它建模的是 bags 之间的 interactions/dependencies，并用 GNN 进行端到端学习。",
         "论文指出有意义的 bag graph 往往不可得或有噪声，因此用 Bayesian GNN 处理图结构不确定性。",
         "回答可以提到它与 Tu 2019 的区别：Tu 2019 主要是 bag 内 instance graph，而 Pal 2022 强调 bag graph。"
@@ -424,7 +424,7 @@
         }
       ],
       "negative_checks": [
-        "不要把 BGMIL 简化成普通 bag 内部构图的 GNN-MIL。",
+        "不要把 BGMIL 简化成普通 bag 内部构图的 GNN for MIL。",
         "不要遗漏 Bayesian/uncertainty，因为这是这篇的核心特征。"
       ]
     },
@@ -451,7 +451,7 @@
         "p07"
       ],
       "expected_answer_points": [
-        "至少应列出 GNN-MIL/Tu 2019：每个 bag 建图并用 GNN 学习 graph representation。",
+        "至少应列出 GNN for MIL/Tu 2019：每个 bag 建图并用 GNN 学习 graph representation。",
         "应列出 RGMIL/Zhao 2024：reinforced GNN framework，用 MADRL 调节 graph 和 GNN 层数。",
         "应列出 BGMIL/BGNN-MIL/Pal 2022：用 Bayesian GNN 建模 bag graph。",
         "可列出 Patch-GCN/Chen 2021：WSI patch 图上的 GCN。",
@@ -534,7 +534,7 @@
         "应列出 Zhou 2009 的 MIGraph/miGraph：基于 graph kernel 或隐式 graph kernel 的 MIL。",
         "应列出 2024 Double Similarities DSMIL：构造 Double Similarities weighted MIL kernel，并用于 SVM。",
         "可以说明二者都利用结构或相似度，但不是神经网络 message passing。",
-        "应明确排除 GNN-MIL、RGMIL、BGMIL/BGNN-MIL、Patch-GCN、NAGCN。"
+        "应明确排除 GNN for MIL、RGMIL、BGMIL/BGNN-MIL、Patch-GCN、NAGCN。"
       ],
       "evidence": [
         {
@@ -664,13 +664,13 @@
       "type": "single_turn",
       "category": "cross_paper_comparison",
       "difficulty": "hard",
-      "question": "miGraph/MIGraph 和 GNN-MIL 优缺点怎么比？",
-      "canonical_question": "比较 Zhou 2009 graph-kernel MIL 与 Tu 2019 GNN-MIL 在结构建模、学习方式、可扩展性和局限上的差异。",
+      "question": "miGraph/MIGraph 和 GNN for MIL 优缺点怎么比？",
+      "canonical_question": "比较 Zhou 2009 graph-kernel MIL 与 Tu 2019 GNN for MIL 在结构建模、学习方式、可扩展性和局限上的差异。",
       "query_style": "natural_comparison",
       "alias_terms": [
         "miGraph",
         "MIGraph",
-        "GNN-MIL",
+        "GNN for MIL",
         "graph kernel vs GNN"
       ],
       "target_papers": [
@@ -680,8 +680,8 @@
       "expected_answer_points": [
         "miGraph/MIGraph 通过 graph kernel 改造 bag 相似度，优点是清晰地把 non-i.i.d. 实例关系纳入 kernel 框架。",
         "MIGraph 显式构图更直观但计算代价高；miGraph 更高效但结构表达更隐式。",
-        "GNN-MIL 将 bag 转图后用 GNN 端到端学习表示，优点是能通过 message passing 学习关系表征。",
-        "GNN-MIL 的局限包括图构建启发式、聚合策略和结构超参数选择会影响结果。",
+        "GNN for MIL 将 bag 转图后用 GNN 端到端学习表示，优点是能通过 message passing 学习关系表征。",
+        "GNN for MIL 的局限包括图构建启发式、聚合策略和结构超参数选择会影响结果。",
         "二者不是同一技术范式：前者是 kernel/SVM 思路，后者是 neural message passing 思路。"
       ],
       "evidence": [
@@ -920,31 +920,31 @@
       "category": "context_memory",
       "difficulty": "hard",
       "alias_terms": [
-        "MIL-GNN",
-        "GNN-MIL",
+        "GNN for MIL",
+        "Tu 2019",
         "其",
         "这个思路"
       ],
-      "conversation_expectation": "三轮必须在同一个 session 中运行。第 2 轮的“其”和第 3 轮的“这个思路”都应指代第 1 轮中的 GNN-MIL/Tu 2019，而不是重新猜一个方法。",
+      "conversation_expectation": "三轮必须在同一个 session 中运行。第 2 轮的“其”和第 3 轮的“这个思路”都应指代第 1 轮中的 GNN for MIL/Tu 2019，而不是重新猜一个方法。",
       "turns": [
         {
           "turn_id": "t1",
           "type": "multi_turn",
-          "category": "context_memory_summary",
+          "category": "context_memory_method_identification",
           "difficulty": "medium",
-          "question": "MIL-GNN 的流程是什么？",
-          "canonical_question": "用户把 GNN-MIL 写成 MIL-GNN 时，系统仍应定位 Tu 2019 并说明方法流程。",
+          "question": "GNN for MIL 的流程是什么？",
+          "canonical_question": "定位 Tu 2019 GNN for MIL，并说明其 bag-to-graph、message passing、graph aggregation 和分类流程。",
           "query_style": "context_turn_1",
           "alias_terms": [
-            "MIL-GNN",
-            "GNN-MIL",
+            "GNN for MIL",
+            "Tu 2019",
             "bag graph"
           ],
           "target_papers": [
             "p02"
           ],
           "expected_answer_points": [
-            "应把 MIL-GNN 纠正或关联到 GNN-MIL/Tu 2019，而不是另找一篇不存在的 MIL-GNN。",
+            "应定位到 GNN for MIL/Tu 2019，而不是混入其他 graph-based MIL 方法。",
             "流程包括 bag-to-graph：实例作为节点，邻接矩阵由启发式策略构造。",
             "在构造的 graph 上用 GNN 做 message passing。",
             "用 graph aggregation/differentiable pooling 得到 bag embedding。",
@@ -990,7 +990,7 @@
             }
           ],
           "negative_checks": [
-            "不要因为用户写 MIL-GNN 就编造一个新缩写。",
+            "不要把 GNN for MIL 当作论文作者定义的缩写。",
             "不要只说“GNN 用于 MIL”，要说明流程。"
           ]
         },
@@ -1000,18 +1000,18 @@
           "category": "context_memory_pros_cons",
           "difficulty": "hard",
           "question": "总结其优缺点。",
-          "canonical_question": "在多轮上下文中，“其”应指代 GNN-MIL/Tu 2019；总结该方法优缺点。",
+          "canonical_question": "在多轮上下文中，“其”应指代 GNN for MIL/Tu 2019；总结该方法优缺点。",
           "query_style": "context_turn_2",
           "alias_terms": [
             "其",
-            "GNN-MIL",
+            "GNN for MIL",
             "pros and cons"
           ],
           "target_papers": [
             "p02"
           ],
           "expected_answer_points": [
-            "应保持上下文，明确“其”指 GNN-MIL/Tu 2019。",
+            "应保持上下文，明确“其”指 GNN for MIL/Tu 2019。",
             "优点：把实例关系显式放入 graph，GNN message passing 能建模 instance 间关系。",
             "优点：端到端学习 bag representation，并提供 graph aggregation/differentiable pooling 等聚合路径。",
             "优点：相比传统 graph-kernel，学习到的 representation 更灵活。",
@@ -1058,7 +1058,7 @@
           ],
           "negative_checks": [
             "不要把“其”误解为上一轮检索到的其他论文。",
-            "不要只给泛泛优缺点，必须围绕 GNN-MIL 的构图、message passing 和聚合。"
+            "不要只给泛泛优缺点，必须围绕 GNN for MIL 的构图、message passing 和聚合。"
           ]
         },
         {
@@ -1067,11 +1067,11 @@
           "category": "context_memory_followup",
           "difficulty": "hard",
           "question": "有哪些论文是在这个思路上继续改进的？",
-          "canonical_question": "在多轮上下文中，“这个思路”应指 GNN-MIL 的 bag graph + GNN 表示学习路线；列出后续相关改进论文。",
+          "canonical_question": "在多轮上下文中，“这个思路”应指 GNN for MIL 的 bag graph + GNN 表示学习路线；列出后续相关改进论文。",
           "query_style": "context_turn_3",
           "alias_terms": [
             "这个思路",
-            "GNN-MIL 后续",
+            "GNN for MIL 后续",
             "RGMIL",
             "Patch-GCN",
             "NAGCN",
@@ -1084,12 +1084,12 @@
             "p07"
           ],
           "expected_answer_points": [
-            "应保持上下文，知道“这个思路”指 GNN-MIL/Tu 2019 的图神经网络 MIL 路线。",
+            "应保持上下文，知道“这个思路”指 GNN for MIL/Tu 2019 的图神经网络 MIL 路线。",
             "应列出 RGMIL/Zhao 2024：继续在 GNN-based MIL 中调节 bag graph 边阈值和 GNN 层数。",
             "可列出 BGMIL/BGNN-MIL/Pal 2022：把 GNN 用到 bag 之间的 graph，并用 Bayesian GNN 处理图不确定性；应说明它不是简单的 bag 内构图改进。",
             "可列出 Patch-GCN/Chen 2021：把 WSI patch 建成空间 kNN 图并用 GCN 聚合上下文。",
             "可列出 NAGCN/Guan 2022：通过 node alignment 和 global-to-local clustering 改善 WSI 图表示。",
-            "应避免把 miGraph/MIGraph 或 DSMIL 当成 GNN-MIL 的神经网络后续改进。"
+            "应避免把 miGraph/MIGraph 或 DSMIL 当成 GNN for MIL 的神经网络后续改进。"
           ],
           "evidence": [
             {
@@ -1162,7 +1162,7 @@
           ],
           "negative_checks": [
             "不要把“这个思路”误解为 DSMIL 的 double similarities kernel。",
-            "不要把 graph-kernel 方法列为 GNN-MIL 的神经网络改进。",
+            "不要把 graph-kernel 方法列为 GNN for MIL 的神经网络改进。",
             "不要只回答“有很多后续论文”，需要给出具体论文和改进点。"
           ]
         }

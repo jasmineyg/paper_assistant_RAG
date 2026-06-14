@@ -18,9 +18,8 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from openai import OpenAIError
 
 from paper_assistant_rag.archrag.pipeline import ArchRAGPipeline
-from paper_assistant_rag.archrag_generation import generate_archrag_answer
-from paper_assistant_rag.archrag_generation import archrag_level_results_to_documents
-from paper_assistant_rag.archrag_index import hierarchical_search
+from paper_assistant_rag.archrag_generation import generate_archrag_answer, rerank_archrag_chunks
+from paper_assistant_rag.archrag_index import hierarchical_search_by_embedding
 from paper_assistant_rag.archrag_index import load_archrag_index
 from paper_assistant_rag.community_retrieval import (
     adaptive_filter_documents,
@@ -136,8 +135,10 @@ def ask_question(
                 raise typer.Exit(1) from exc
         ask_archrag_question(
             question=question,
+            index_dir=index_dir,
             archrag_dir=archrag_dir,
             settings=settings,
+            final_chunk_limit=k,
             top_k_per_level=top_k_per_level,
             show_archrag_debug=show_archrag_debug,
             max_levels=max_levels,
@@ -199,8 +200,10 @@ def ask_question(
 
 def ask_archrag_question(
     question: str,
+    index_dir: Path,
     archrag_dir: Path,
     settings: Settings,
+    final_chunk_limit: int,
     top_k_per_level: int,
     show_archrag_debug: bool,
     max_levels: int | None,
@@ -215,6 +218,7 @@ def ask_archrag_question(
 
     llm = build_llm(settings)
     embeddings = build_embeddings(settings)
+    vectorstore = load_index(index_dir, settings)
     try:
         with console.status("[cyan]Running hierarchical ArchRAG search and adaptive filtering...[/cyan]", spinner="dots"):
             result = generate_archrag_answer(
@@ -222,8 +226,10 @@ def ask_archrag_question(
                 arch_index=arch_index,
                 llm=llm,
                 embeddings=embeddings,
+                vectorstore=vectorstore,
                 top_k_per_level=top_k_per_level,
                 max_levels=max_levels,
+                final_chunk_limit=final_chunk_limit,
             )
     except (OpenAIError, HTTPError) as error:
         print_model_error(error, settings)
@@ -344,16 +350,22 @@ def build_hybrid_retriever(
                 if archrag_dir is None:
                     raise RetrievalServiceError("archrag retrieval requires archrag_dir")
                 arch_index = load_archrag_index(archrag_dir)
-                search_result = hierarchical_search(
+                embeddings = build_embeddings(Settings.from_env())
+                query_embedding = [float(value) for value in embeddings.embed_query(query)]
+                search_result = hierarchical_search_by_embedding(
                     arch_index=arch_index,
+                    query_embedding=query_embedding,
                     query=query,
-                    embeddings=build_embeddings(Settings.from_env()),
                     top_k_per_level=top_k_per_level,
                     max_levels=max_levels,
                 )
-                selected_results = archrag_level_results_to_documents(
-                    search_result["level_results"],
+                selected_results = rerank_archrag_chunks(
+                    query=query,
+                    level_results=search_result["level_results"],
+                    vectorstore=vectorstore,
+                    embeddings=embeddings,
                     limit=k,
+                    query_embedding=query_embedding,
                 )
             elif mode == "archrag-lite":
                 if graph_dir is None or community_index_dir is None:

@@ -17,6 +17,7 @@ paper_assistant_RAG 已从普通 Hybrid RAG 重构为 ArchRAG-style 学术论文
 - 不要把新功能塞进 `main.py`；CLI 只放命令编排，核心逻辑放模块。
 - memory 仅辅助问题改写，不可替代本轮 ArchRAG 检索。
 - `stable_chunk_id` 不可随意改动。
+- 查询改写、术语识别和 rerank 必须采用可迁移的通用方法；禁止把评测集中的论文名、作者、方法简称或答案映射硬编码进运行时检索逻辑。
 - 修改 ArchRAG 流程、数据结构或命令时，必须同步维护本文件。
 
 ## ArchRAG 对齐流程
@@ -51,11 +52,21 @@ PDF / Paper Corpus
 
 ```text
 Query Embedding
--> Hierarchical Search over entities + communities
+-> Parent-constrained top-down beam search over entities + communities
+-> Query-aware source chunk reranking
 -> Per-level adaptive filtering reports
 -> Ranked evidence selection
 -> Final Answer Generation
 ```
+
+默认在线检索参数：
+
+- 每层展示 `top_k_per_level=5` 个节点，向下扩展 beam width 为 `3`。
+- 子层候选仅来自当前 beam 父节点的 `children` / inter-layer link；仅在层级链接缺失时回退到层内搜索。
+- 子节点路径分数使用 `0.85 * local semantic score + 0.15 * parent route score`。
+- 最终 chunk 使用 `0.65 * chunk semantic + 0.25 * hierarchy route + 0.10 * keyword` 重排。
+- 多样性约束默认为每个层级节点最多 `3` 个 chunk、每篇论文最多 `6` 个 chunk；候选不足时再放宽约束补齐。
+- 以上均为在线逻辑修改，可直接复用已有 FAISS、KG、hierarchy 和 node embedding，不要求重建离线索引。
 
 对应入口：
 
@@ -130,8 +141,9 @@ Query Embedding
 - `persist_attributed_kg()`：entity/relation textual attributes + embeddings snapshot。
 - `build_hierarchical_communities()`：迭代 attributed community hierarchy。
 - `build_archrag_index()`：C-HNSW-like layer links。
-- `hierarchical_search()`：top-down multi-level retrieval。
-- `generate_archrag_answer()`：hierarchical search -> adaptive filtering -> final answer。
+- `hierarchical_search()`：父节点约束的 top-down beam retrieval。
+- `rerank_archrag_chunks()`：回到原始 FAISS chunk，执行 query-aware 语义 / 路径 / 关键词重排和多样性约束。
+- `generate_archrag_answer()`：hierarchical beam search -> chunk rerank -> adaptive filtering -> final answer。
 - `PaperAssistantService.ask()`：UI / 非 CLI 入口的稳定问答接口，返回 answer、sources、retrieval、filter_reports 和 metadata。
 - `run_evaluation()`：评测并输出 retrieval/debug/report artifacts。
 
