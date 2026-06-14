@@ -6,7 +6,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from paper_assistant_rag.kg import ENTITIES_FILE, RELATIONS_FILE, build_kg_cache
 from paper_assistant_rag.paths import DEFAULT_EMBED_BATCH_SIZE
@@ -142,15 +142,52 @@ def persist_attributed_kg(graph_dir: Path, embeddings) -> Path:
     for relation, vector in zip(relations, relation_vectors, strict=False):
         relation.embedding = vector
 
-    payload = {
-        "schema": "paper_assistant_rag.archrag.attributed_kg.v1",
-        "built_at": datetime.now(timezone.utc).isoformat(),
-        "entities": [asdict(entity) for entity in entities],
-        "relations": [asdict(relation) for relation in relations],
-    }
     path = graph_dir / ATTRIBUTED_KG_FILE
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _write_attributed_kg_snapshot(
+        path=path,
+        entities=entities,
+        relations=relations,
+        built_at=datetime.now(timezone.utc).isoformat(),
+    )
     return path
+
+
+def _write_attributed_kg_snapshot(
+    path: Path,
+    entities: list[ArchRAGEntity],
+    relations: list[ArchRAGRelation],
+    built_at: str,
+) -> None:
+    """Stream the large embedding snapshot to avoid duplicating it in memory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    with temporary_path.open("w", encoding="utf-8", newline="\n") as file:
+        file.write("{\n")
+        file.write('  "schema": ')
+        json.dump("paper_assistant_rag.archrag.attributed_kg.v1", file, ensure_ascii=False)
+        file.write(',\n  "built_at": ')
+        json.dump(built_at, file, ensure_ascii=False)
+        file.write(',\n  "entities": ')
+        _write_dataclass_array(file, entities)
+        file.write(',\n  "relations": ')
+        _write_dataclass_array(file, relations)
+        file.write("\n}\n")
+    temporary_path.replace(path)
+
+
+def _write_dataclass_array(
+    file: TextIO,
+    records: list[ArchRAGEntity] | list[ArchRAGRelation],
+) -> None:
+    file.write("[")
+    for index, record in enumerate(records):
+        if index:
+            file.write(",")
+        file.write("\n    ")
+        json.dump(asdict(record), file, ensure_ascii=False, separators=(",", ":"))
+    if records:
+        file.write("\n  ")
+    file.write("]")
 
 
 def _source_chunk_ids(raw_refs: Any) -> list[str]:

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 
 @dataclass
@@ -18,7 +21,7 @@ class ArchNode:
     name: str
     text: str
     summary: str
-    embedding: list[float] = field(default_factory=list)
+    embedding: list[float] | np.ndarray = field(default_factory=list)
     source_chunks: list[str] = field(default_factory=list)
     children: list[str] = field(default_factory=list)
     parents: list[str] = field(default_factory=list)
@@ -26,11 +29,31 @@ class ArchNode:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert this node to a JSON-serializable dictionary."""
-        return asdict(self)
+        return {
+            "node_id": self.node_id,
+            "level": self.level,
+            "node_type": self.node_type,
+            "name": self.name,
+            "text": self.text,
+            "summary": self.summary,
+            "embedding": self.embedding.tolist()
+            if isinstance(self.embedding, np.ndarray)
+            else list(self.embedding),
+            "source_chunks": list(self.source_chunks),
+            "children": list(self.children),
+            "parents": list(self.parents),
+            "metadata": dict(self.metadata),
+        }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ArchNode":
+    def from_dict(cls, payload: dict[str, Any], compact_embedding: bool = False) -> "ArchNode":
         """Create a node from a JSON dictionary, tolerating older missing keys."""
+        raw_embedding = payload.get("embedding", [])
+        embedding = (
+            np.asarray(raw_embedding, dtype=np.float32)
+            if compact_embedding
+            else [float(value) for value in raw_embedding]
+        )
         return cls(
             node_id=str(payload.get("node_id", "")),
             level=int(payload.get("level", 0)),
@@ -38,7 +61,7 @@ class ArchNode:
             name=str(payload.get("name", "")),
             text=str(payload.get("text", "")),
             summary=str(payload.get("summary", "")),
-            embedding=[float(value) for value in payload.get("embedding", [])],
+            embedding=embedding,
             source_chunks=[str(value) for value in payload.get("source_chunks", [])],
             children=[str(value) for value in payload.get("children", [])],
             parents=[str(value) for value in payload.get("parents", [])],
@@ -162,6 +185,8 @@ def save_arch_index(index: ArchIndex, archrag_dir: Path, build_config: dict[str,
         encoding="utf-8",
     )
     if build_config is not None:
+        build_config = dict(build_config)
+        build_config.setdefault("entry_node_id", index.entry_node_id)
         (archrag_dir / "build_config.json").write_text(
             json.dumps(build_config, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -170,6 +195,15 @@ def save_arch_index(index: ArchIndex, archrag_dir: Path, build_config: dict[str,
 
 def load_arch_index(archrag_dir: Path) -> ArchIndex:
     """Load an ArchRAG hierarchy/index from disk."""
+    sharded_paths = [
+        archrag_dir / "nodes.jsonl",
+        archrag_dir / "layers.json",
+        archrag_dir / "intra_links.json",
+        archrag_dir / "inter_links.json",
+    ]
+    if all(path.exists() for path in sharded_paths):
+        return _load_sharded_arch_index(archrag_dir)
+
     hierarchy_path = archrag_dir / "hierarchy.json"
     if not hierarchy_path.exists():
         raise FileNotFoundError(
@@ -177,3 +211,74 @@ def load_arch_index(archrag_dir: Path) -> ArchIndex:
         )
     payload = json.loads(hierarchy_path.read_text(encoding="utf-8"))
     return ArchIndex.from_dict(payload)
+
+
+def _load_sharded_arch_index(archrag_dir: Path) -> ArchIndex:
+    layers_payload = _read_json(archrag_dir / "layers.json")
+    intra_links_payload = _read_json(archrag_dir / "intra_links.json")
+    inter_links_payload = _read_json(archrag_dir / "inter_links.json")
+    build_config_path = archrag_dir / "build_config.json"
+    metadata = _read_json(build_config_path) if build_config_path.exists() else {}
+
+    layers = {
+        int(level): ArchLayer(level=int(layer.get("level", level)))
+        for level, layer in layers_payload.items()
+        if isinstance(layer, dict)
+    }
+    with (archrag_dir / "nodes.jsonl").open("r", encoding="utf-8") as file:
+        for line in file:
+            if not line.strip():
+                continue
+            node_payload = json.loads(line)
+            node = ArchNode.from_dict(node_payload, compact_embedding=True)
+            layers.setdefault(node.level, ArchLayer(level=node.level)).nodes[node.node_id] = node
+
+    for level, links in intra_links_payload.items():
+        level_number = int(level)
+        layer = layers.setdefault(level_number, ArchLayer(level=level_number))
+        if isinstance(links, dict):
+            layer.intra_links = {
+                str(node_id): [str(target) for target in targets]
+                for node_id, targets in links.items()
+                if isinstance(targets, list)
+            }
+
+    entry_node_id = str(metadata.get("entry_node_id") or "") or _read_entry_node_id(
+        archrag_dir / "hierarchy.json"
+    )
+    if not entry_node_id and layers:
+        top_layer = layers[max(layers)]
+        entry_node_id = _fallback_entry_node(top_layer)
+
+    return ArchIndex(
+        layers=layers,
+        inter_links={str(key): str(value) for key, value in inter_links_payload.items()},
+        entry_node_id=entry_node_id or None,
+        metadata=metadata,
+    )
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as file:
+        payload = json.load(file)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected a JSON object in {path}")
+    return payload
+
+
+def _read_entry_node_id(hierarchy_path: Path) -> str:
+    if not hierarchy_path.exists():
+        return ""
+    with hierarchy_path.open("r", encoding="utf-8") as file:
+        header = file.read(16_384)
+    match = re.search(r'"entry_node_id"\s*:\s*"([^"]+)"', header)
+    return match.group(1) if match else ""
+
+
+def _fallback_entry_node(layer: ArchLayer) -> str:
+    if not layer.nodes:
+        return ""
+    return sorted(
+        layer.nodes.values(),
+        key=lambda node: (-len(node.children), -len(node.source_chunks), node.node_id),
+    )[0].node_id

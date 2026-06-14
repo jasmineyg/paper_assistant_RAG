@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import heapq
-import math
 from pathlib import Path
 from typing import Any
 
@@ -166,22 +165,22 @@ def _normalized_embedding_matrix(layer: ArchLayer) -> tuple[list[str], np.ndarra
 def _normalized_nodes_matrix(nodes: dict[str, ArchNode]) -> tuple[list[str], np.ndarray]:
     """Return node ids and an L2-normalized float32 embedding matrix for node dicts."""
     node_ids: list[str] = []
-    rows: list[list[float]] = []
+    rows: list[np.ndarray] = []
     expected_dim: int | None = None
     for node_id in sorted(nodes):
-        vector = [float(value) for value in nodes[node_id].embedding]
-        if not vector:
+        vector = np.asarray(nodes[node_id].embedding, dtype=np.float32)
+        if vector.size == 0:
             continue
         if expected_dim is None:
-            expected_dim = len(vector)
-        if len(vector) != expected_dim:
+            expected_dim = int(vector.size)
+        if vector.ndim != 1 or vector.size != expected_dim:
             continue
         node_ids.append(node_id)
         rows.append(vector)
     if not rows:
         return [], np.empty((0, 0), dtype=np.float32)
 
-    matrix = np.asarray(rows, dtype=np.float32)
+    matrix = np.stack(rows)
     norms = np.linalg.norm(matrix, axis=1, keepdims=True)
     valid_mask = (norms[:, 0] > 0.0) & np.isfinite(norms[:, 0])
     if not np.all(valid_mask):
@@ -296,7 +295,7 @@ def _normalized_query_vector(vector: list[float], expected_dim: int) -> np.ndarr
     """Return an L2-normalized query vector or None when dimensions are invalid."""
     if expected_dim <= 0 or len(vector) != expected_dim:
         return None
-    query = np.asarray([float(value) for value in vector], dtype=np.float32)
+    query = np.asarray(vector, dtype=np.float32)
     norm = float(np.linalg.norm(query))
     if norm == 0.0 or not np.isfinite(norm):
         return None
@@ -346,13 +345,15 @@ def _node_result(node: ArchNode, score: float) -> dict[str, Any]:
     }
 
 
-def _cosine(left: list[float], right: list[float]) -> float:
+def _cosine(left: list[float] | np.ndarray, right: list[float] | np.ndarray) -> float:
     """Compute cosine similarity for two dense vectors."""
-    if not left or not right or len(left) != len(right):
+    if len(left) == 0 or len(right) == 0 or len(left) != len(right):
         return 0.0
-    dot = sum(a * b for a, b in zip(left, right, strict=False))
-    left_norm = math.sqrt(sum(a * a for a in left))
-    right_norm = math.sqrt(sum(b * b for b in right))
+    left_vector = np.asarray(left, dtype=np.float32)
+    right_vector = np.asarray(right, dtype=np.float32)
+    dot = float(left_vector @ right_vector)
+    left_norm = float(np.linalg.norm(left_vector))
+    right_norm = float(np.linalg.norm(right_vector))
     if left_norm == 0.0 or right_norm == 0.0:
         return 0.0
     return dot / (left_norm * right_norm)
