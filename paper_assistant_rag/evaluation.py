@@ -11,12 +11,14 @@ from pathlib import Path
 from typing import Any
 
 from httpx import HTTPError
+from langchain_core.messages import AIMessage, HumanMessage
 from openai import OpenAIError
 from rich.table import Table
 
 from paper_assistant_rag.archrag_gated import retrieve_archrag_gated_chunks_with_score
 from paper_assistant_rag.archrag_generation import generate_archrag_answer, rerank_archrag_chunks
 from paper_assistant_rag.archrag_index import hierarchical_search_by_embedding, load_archrag_index
+from paper_assistant_rag.archrag.query_processing import build_retrieval_query, rewrite_query
 from paper_assistant_rag.community_retrieval import retrieve_community_augmented_chunks_with_score
 from paper_assistant_rag.graph_retrieval import retrieve_graph_chunks_with_score
 from paper_assistant_rag.indexing import load_index
@@ -411,6 +413,7 @@ def _evaluate_single_turn_item(
     max_levels: int | None,
     retrieval_mode: str,
     reset_answer_memory: bool = True,
+    archrag_chat_history: list[Any] | None = None,
 ) -> dict[str, Any]:
     retrieval_rows = _retrieve_rows(
         vectorstore=vectorstore,
@@ -428,6 +431,7 @@ def _evaluate_single_turn_item(
         top_k_per_level=top_k_per_level,
         max_levels=max_levels,
         retrieval_mode=retrieval_mode,
+        chat_history=archrag_chat_history,
     )
     row = {
         "id": str(item["id"]),
@@ -455,6 +459,7 @@ def _evaluate_single_turn_item(
                 final_chunk_limit=k,
                 top_k_per_level=top_k_per_level,
                 max_levels=max_levels,
+                chat_history=archrag_chat_history,
             )
         )
     elif answer_chain is not None:
@@ -497,35 +502,41 @@ def _evaluate_multi_turn_item(
         clear_session_history(session_id=session_id, db_path=memory_db)
 
     turn_rows: list[dict[str, Any]] = []
+    archrag_chat_history: list[Any] = []
     for turn_index, turn in enumerate(item["turns"], start=1):
         turn_item = _turn_item(item, turn, turn_index)
         query = _item_query(turn_item, query_field)
         console.print(f"  [dim]turn {turn_index}:[/dim] {query}")
-        turn_rows.append(
-            _evaluate_single_turn_item(
-                item=turn_item,
-                query=query,
-                vectorstore=vectorstore,
-                paper_sources=paper_sources,
-                answer_chain=answer_chain,
-                memory_db=memory_db,
-                session_id=session_id,
-                k=k,
-                include_references=include_references,
-                graph_dir=graph_dir,
-                community_index_dir=community_index_dir,
-                archrag_dir=archrag_dir,
-                arch_index=arch_index,
-                archrag_embeddings=archrag_embeddings,
-                community_k=community_k,
-                candidate_papers=candidate_papers,
-                per_paper_k=per_paper_k,
-                top_k_per_level=top_k_per_level,
-                max_levels=max_levels,
-                retrieval_mode=retrieval_mode,
-                reset_answer_memory=False,
-            )
+        turn_row = _evaluate_single_turn_item(
+            item=turn_item,
+            query=query,
+            vectorstore=vectorstore,
+            paper_sources=paper_sources,
+            answer_chain=answer_chain,
+            memory_db=memory_db,
+            session_id=session_id,
+            k=k,
+            include_references=include_references,
+            graph_dir=graph_dir,
+            community_index_dir=community_index_dir,
+            archrag_dir=archrag_dir,
+            arch_index=arch_index,
+            archrag_embeddings=archrag_embeddings,
+            community_k=community_k,
+            candidate_papers=candidate_papers,
+            per_paper_k=per_paper_k,
+            top_k_per_level=top_k_per_level,
+            max_levels=max_levels,
+            retrieval_mode=retrieval_mode,
+            reset_answer_memory=False,
+            archrag_chat_history=archrag_chat_history,
         )
+        turn_rows.append(turn_row)
+        if normalize_retrieval_mode(retrieval_mode) == "archrag":
+            archrag_chat_history.append(HumanMessage(content=query))
+            answer = str(turn_row.get("answer", "")).strip()
+            if answer:
+                archrag_chat_history.append(AIMessage(content=answer))
 
     return {
         "id": str(item["id"]),
@@ -584,6 +595,7 @@ def _retrieve_rows(
     top_k_per_level: int,
     max_levels: int | None,
     retrieval_mode: str,
+    chat_history: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
     mode = normalize_retrieval_mode(retrieval_mode)
     archrag_debug: dict[str, Any] = {}
@@ -600,15 +612,34 @@ def _retrieve_rows(
             settings = Settings.from_env()
             arch_index = load_archrag_index(archrag_dir)
             archrag_embeddings = build_embeddings(settings)
-        query_embedding = [float(value) for value in archrag_embeddings.embed_query(query)]
+        else:
+            settings = Settings.from_env()
+        try:
+            query_llm = build_llm(settings)
+        except Exception:
+            query_llm = None
+        rewritten_query = rewrite_query(
+            query,
+            llm=query_llm,
+            chat_history=chat_history,
+        )
+        retrieval_query = build_retrieval_query(rewritten_query)
+        query_type = str(rewritten_query["query_type"])
+        query_embedding = [float(value) for value in archrag_embeddings.embed_query(retrieval_query)]
         search_result = hierarchical_search_by_embedding(
             arch_index=arch_index,
             query_embedding=query_embedding,
-            query=query,
+            query=retrieval_query,
             top_k_per_level=top_k_per_level,
             max_levels=max_levels,
+            query_type=query_type,
         )
         archrag_debug = {
+            "rewritten_query": rewritten_query,
+            "query_type": query_type,
+            "entry_nodes": search_result.get("entry_nodes", []),
+            "retrieval_paths": search_result.get("retrieval_paths", []),
+            "beam_widths": search_result.get("beam_widths", {}),
             "path": search_result.get("path", []),
             "beam_trace": search_result.get("beam_trace", {}),
             "candidate_counts": search_result.get("candidate_counts", {}),
@@ -631,12 +662,13 @@ def _retrieve_rows(
             },
         }
         selected_results = rerank_archrag_chunks(
-            query=query,
+            query=retrieval_query,
             level_results=search_result["level_results"],
             vectorstore=vectorstore,
             embeddings=archrag_embeddings,
             limit=k,
             query_embedding=query_embedding,
+            query_type=query_type,
         )
     elif mode == "archrag-lite":
         selected_results = retrieve_community_augmented_chunks_with_score(
@@ -819,6 +851,7 @@ def _answer_archrag_item(
     final_chunk_limit: int,
     top_k_per_level: int,
     max_levels: int | None,
+    chat_history: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Generate an evaluation answer through ArchRAG adaptive filtering."""
     settings = Settings.from_env()
@@ -832,6 +865,7 @@ def _answer_archrag_item(
             top_k_per_level=top_k_per_level,
             max_levels=max_levels,
             final_chunk_limit=final_chunk_limit,
+            chat_history=chat_history,
         )
     except (OpenAIError, HTTPError) as exc:
         return {

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.documents import Document
+from langchain_core.messages import AIMessage, HumanMessage
 
 from paper_assistant_rag.archrag.pipeline import ArchRAGPipeline
 from paper_assistant_rag.archrag_generation import generate_archrag_answer
@@ -14,6 +15,7 @@ from paper_assistant_rag.archrag_index import load_archrag_index
 from paper_assistant_rag.indexing import build_index as build_chunk_index
 from paper_assistant_rag.indexing import index_exists, load_index
 from paper_assistant_rag.memory import clear_session_history
+from paper_assistant_rag.memory import get_session_history
 from paper_assistant_rag.models import build_embeddings, build_llm
 from paper_assistant_rag.paths import (
     DEFAULT_ARCHRAG_DIR,
@@ -97,7 +99,7 @@ class PaperAssistantService:
         )
 
     def clear_chat_history(self, session_id: str = "streamlit") -> None:
-        """Clear persisted chat memory used by baseline conversational chains."""
+        """Clear persisted chat memory used by ArchRAG and baseline query rewriting."""
         clear_session_history(session_id=session_id, db_path=self.memory_db)
 
     def ask(
@@ -116,6 +118,7 @@ class PaperAssistantService:
         if mode == "archrag":
             result = self._ask_archrag(
                 question=question,
+                session_id=session_id,
                 k=k,
                 top_k_per_level=top_k_per_level,
                 max_levels=max_levels,
@@ -139,6 +142,7 @@ class PaperAssistantService:
     def _ask_archrag(
         self,
         question: str,
+        session_id: str,
         k: int,
         top_k_per_level: int,
         max_levels: int | None,
@@ -149,6 +153,11 @@ class PaperAssistantService:
         settings = Settings.from_env()
         arch_index = load_archrag_index(self.archrag_dir)
         embeddings = build_embeddings(settings)
+        history = get_session_history(
+            session_id=session_id,
+            db_path=self.memory_db,
+            max_messages=12,
+        )
         result = generate_archrag_answer(
             query=question,
             arch_index=arch_index,
@@ -158,12 +167,25 @@ class PaperAssistantService:
             top_k_per_level=top_k_per_level,
             max_levels=max_levels,
             final_chunk_limit=k,
+            chat_history=list(history.messages),
+        )
+        history.add_messages(
+            [
+                HumanMessage(content=question),
+                AIMessage(content=str(result.get("answer", ""))),
+            ]
         )
         debug_info = result.get("debug_info", {})
         level_results = _level_results(debug_info)
         return {
             "answer": result.get("answer", ""),
             "sources": result.get("sources", []),
+            "rewritten_query": result.get("rewritten_query", {}),
+            "entry_nodes": result.get("entry_nodes", []),
+            "retrieval_paths": result.get("retrieval_paths", []),
+            "final_chunks": result.get("final_chunks", []),
+            "chunk_scores": result.get("chunk_scores", []),
+            "query_type": result.get("query_type", "fact"),
             "retrieval": _retrieval_summary_from_archrag(result.get("sources", []), level_results),
             "filter_reports": debug_info.get("reports", []),
             "metadata": {

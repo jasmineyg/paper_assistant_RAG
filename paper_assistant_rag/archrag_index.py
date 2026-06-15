@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 
+from paper_assistant_rag.archrag.query_processing import get_beam_width
 from paper_assistant_rag.archrag_types import ArchIndex, ArchLayer, ArchNode, load_arch_index, save_arch_index
 from paper_assistant_rag.ui import create_progress
 
@@ -50,16 +51,71 @@ def search_layer(
     top_k: int,
 ) -> list[dict[str, Any]]:
     """Search one layer from a start node by greedily expanding intra-layer links."""
+    start_node_ids = [start_node_id] if start_node_id else []
+    return _search_layer_from_entries(
+        layer=layer,
+        query_embedding=query_embedding,
+        start_node_ids=start_node_ids,
+        top_k=top_k,
+    )
+
+
+def select_entry_nodes(
+    query_vec: list[float] | np.ndarray,
+    top_layer_nodes: dict[str, ArchNode] | list[ArchNode],
+    K: int = 3,
+) -> list[dict[str, Any]]:
+    """Select the top-K highest-layer nodes by query embedding similarity."""
+    nodes = (
+        top_layer_nodes
+        if isinstance(top_layer_nodes, dict)
+        else {node.node_id: node for node in top_layer_nodes}
+    )
+    if not nodes or K <= 0:
+        return []
+    layer = ArchLayer(level=max(node.level for node in nodes.values()), nodes=nodes)
+    scores = _score_all_nodes(layer, list(query_vec))
+    if scores:
+        ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))[: min(K, len(scores))]
+    else:
+        fallback_id = _central_node(nodes)
+        ranked = [(fallback_id, 0.0)] if fallback_id else []
+    return [
+        {
+            "node_id": node_id,
+            "score": float(score),
+            "level": nodes[node_id].level,
+            "node_type": nodes[node_id].node_type,
+            "name": nodes[node_id].name,
+        }
+        for node_id, score in ranked
+    ]
+
+
+def _search_layer_from_entries(
+    layer: ArchLayer,
+    query_embedding: list[float],
+    start_node_ids: list[str],
+    top_k: int,
+) -> list[dict[str, Any]]:
+    """Search one layer from multiple entry nodes and merge their traversal."""
     if not layer.nodes or top_k <= 0:
         return []
-    start = start_node_id if start_node_id in layer.nodes else _central_node(layer.nodes)
-    if start is None:
+    starts = [node_id for node_id in dict.fromkeys(start_node_ids) if node_id in layer.nodes]
+    if not starts:
+        fallback = _central_node(layer.nodes)
+        starts = [fallback] if fallback else []
+    if not starts:
         return []
 
     visited: set[str] = set()
-    candidates: list[tuple[float, str]] = [(-_score_node(layer.nodes[start], query_embedding), start)]
+    candidates: list[tuple[float, str]] = [
+        (-_score_node(layer.nodes[node_id], query_embedding), node_id)
+        for node_id in starts
+    ]
+    heapq.heapify(candidates)
     best_by_id: dict[str, float] = {}
-    expansions = min(len(layer.nodes), max(32, top_k * 8))
+    expansions = min(len(layer.nodes), max(32, top_k * 8, len(starts) * 8))
 
     while candidates and len(visited) < expansions:
         negative_score, node_id = heapq.heappop(candidates)
@@ -88,7 +144,9 @@ def hierarchical_search(
     embeddings,
     top_k_per_level: int = 5,
     max_levels: int | None = None,
-    beam_width: int = DEFAULT_BEAM_WIDTH,
+    beam_width: int | None = None,
+    query_type: str = "fact",
+    entry_k: int = 3,
 ) -> dict[str, Any]:
     """Run parent-constrained top-down beam search from the highest layer."""
     query_embedding = [float(value) for value in embeddings.embed_query(query)]
@@ -99,6 +157,8 @@ def hierarchical_search(
         top_k_per_level=top_k_per_level,
         max_levels=max_levels,
         beam_width=beam_width,
+        query_type=query_type,
+        entry_k=entry_k,
     )
 
 
@@ -107,8 +167,10 @@ def hierarchical_search_by_embedding(
     query_embedding: list[float],
     top_k_per_level: int = 5,
     max_levels: int | None = None,
-    beam_width: int = DEFAULT_BEAM_WIDTH,
+    beam_width: int | None = None,
     query: str = "",
+    query_type: str = "fact",
+    entry_k: int = 3,
 ) -> dict[str, Any]:
     """Run parent-constrained beam search with an already-computed query vector."""
     if not arch_index.layers:
@@ -123,16 +185,29 @@ def hierarchical_search_by_embedding(
     candidate_counts: dict[int, int] = {}
     fallback_levels: list[int] = []
     parent_beam: list[dict[str, Any]] = []
-    beam_width = max(1, int(beam_width))
+    beam_widths: dict[int, int] = {}
+    entry_nodes: list[dict[str, Any]] = []
 
     for level_index, level in enumerate(available_levels):
         layer = arch_index.layers[level]
+        current_beam_width = (
+            max(1, int(beam_width))
+            if beam_width is not None
+            else get_beam_width(query_type, depth=level_index)
+        )
+        beam_widths[level] = current_beam_width
+        level_top_k = max(1, int(top_k_per_level), current_beam_width)
         if level_index == 0:
-            results = search_layer(
+            entry_nodes = select_entry_nodes(
+                query_vec=query_embedding,
+                top_layer_nodes=layer.nodes,
+                K=entry_k,
+            )
+            results = _search_layer_from_entries(
                 layer=layer,
                 query_embedding=query_embedding,
-                start_node_id=arch_index.entry_node_id,
-                top_k=top_k_per_level,
+                start_node_ids=[str(row["node_id"]) for row in entry_nodes],
+                top_k=level_top_k,
             )
             for result in results:
                 result["local_score"] = float(result["score"])
@@ -152,7 +227,7 @@ def hierarchical_search_by_embedding(
                     layer=layer,
                     query_embedding=query_embedding,
                     parent_candidates=parent_candidates,
-                    top_k=top_k_per_level,
+                    top_k=level_top_k,
                 )
             else:
                 fallback_levels.append(level)
@@ -161,7 +236,7 @@ def hierarchical_search_by_embedding(
                     layer=layer,
                     query_embedding=query_embedding,
                     start_node_id=fallback_start,
-                    top_k=top_k_per_level,
+                    top_k=level_top_k,
                 )
                 for result in results:
                     result["local_score"] = float(result["score"])
@@ -173,7 +248,7 @@ def hierarchical_search_by_embedding(
             parent_beam = []
             beam_trace[level] = []
             continue
-        parent_beam = results[:beam_width]
+        parent_beam = results[:current_beam_width]
         beam_trace[level] = [str(result["node_id"]) for result in parent_beam]
         path.append(
             {
@@ -185,9 +260,13 @@ def hierarchical_search_by_embedding(
 
     return {
         "query": query,
+        "query_type": query_type,
         "level_results": level_results,
         "path": path,
-        "beam_width": beam_width,
+        "retrieval_paths": _retrieval_paths(level_results),
+        "entry_nodes": entry_nodes,
+        "beam_width": max(beam_widths.values(), default=DEFAULT_BEAM_WIDTH),
+        "beam_widths": beam_widths,
         "beam_trace": beam_trace,
         "candidate_counts": candidate_counts,
         "fallback_levels": fallback_levels,
@@ -479,6 +558,25 @@ def _node_result(node: ArchNode, score: float) -> dict[str, Any]:
     }
 
 
+def _retrieval_paths(
+    level_results: dict[int, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Flatten route-aware node results for diagnostics and downstream clients."""
+    paths: list[dict[str, Any]] = []
+    for level in sorted(level_results, reverse=True):
+        for result in level_results[level]:
+            paths.append(
+                {
+                    "level": level,
+                    "node_id": str(result.get("node_id", "")),
+                    "parent_node_ids": list(result.get("parent_node_ids", [])),
+                    "local_score": float(result.get("local_score", result.get("score", 0.0))),
+                    "route_score": float(result.get("route_score", result.get("score", 0.0))),
+                }
+            )
+    return paths
+
+
 def _cosine(left: list[float] | np.ndarray, right: list[float] | np.ndarray) -> float:
     """Compute cosine similarity for two dense vectors."""
     if len(left) == 0 or len(right) == 0 or len(left) != len(right):
@@ -499,4 +597,5 @@ __all__ = [
     "hierarchical_search",
     "hierarchical_search_by_embedding",
     "load_archrag_index",
+    "select_entry_nodes",
 ]

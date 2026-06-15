@@ -15,7 +15,7 @@ paper_assistant_RAG 已从普通 Hybrid RAG 重构为 ArchRAG-style 学术论文
 - 功能优先，架构服务于论文流程。
 - 每次修改必须考虑对 paper hit / chunk hit / citation / entity hit / community hit 的影响。
 - 不要把新功能塞进 `main.py`；CLI 只放命令编排，核心逻辑放模块。
-- memory 仅辅助问题改写，不可替代本轮 ArchRAG 检索。
+- memory 仅用于 history-aware query rewrite，负责解析追问、代词和省略主语；不可替代本轮 ArchRAG 检索或作为事实证据。
 - `stable_chunk_id` 不可随意改动。
 - 查询改写、术语识别和 rerank 必须采用可迁移的通用方法；禁止把评测集中的论文名、作者、方法简称或答案映射硬编码进运行时检索逻辑。
 - 修改 ArchRAG 流程、数据结构或命令时，必须同步维护本文件。
@@ -51,9 +51,11 @@ PDF / Paper Corpus
 当前默认在线阶段：
 
 ```text
-Query Embedding
--> Parent-constrained top-down beam search over entities + communities
--> Query-aware source chunk reranking
+LLM Structured Query Rewriting
+-> Rewritten Query Embedding
+-> Query-aware Top-layer Entry Selection
+-> Parent-constrained Adaptive-beam Search over Entities + Communities
+-> Query-type-conditioned Source Chunk Reranking
 -> Per-level adaptive filtering reports
 -> Ranked evidence selection
 -> Final Answer Generation
@@ -61,11 +63,14 @@ Query Embedding
 
 默认在线检索参数：
 
-- 每层展示 `top_k_per_level=5` 个节点，向下扩展 beam width 为 `3`。
+- query rewrite 读取当前 session 的最近对话，输出 `original_query`、`standalone_query`、`entities`、`keywords`、`sub_questions` 和 `query_type`；`standalone_query` 负责消解追问上下文并作为 downstream embedding query，LLM 失败时使用本轮原问题和通用启发式回退。
+- top layer 对全部节点计算 query similarity，默认选择 `entry_k=3` 个 query-aware entry nodes，不再依赖单一持久化入口。
+- beam width 按 query type 和 depth 动态变化：fact=`2`，multi-hop=`4+depth`，abstract=`6+depth`，procedural=`5`；旧 `top_k_per_level` 参数保留为兼容下限。
 - 子层候选仅来自当前 beam 父节点的 `children` / inter-layer link；仅在层级链接缺失时回退到层内搜索。
 - 子节点路径分数使用 `0.85 * local semantic score + 0.15 * parent route score`。
-- 最终 chunk 使用 `0.65 * chunk semantic + 0.25 * hierarchy route + 0.10 * keyword` 重排。
+- 最终 chunk 根据 query type 动态生成 semantic / hierarchy / keyword 权重；fact 提高 keyword，multi-hop 提高 hierarchy，abstract 提高 semantic，procedural 平衡 semantic 与 hierarchy。
 - 多样性约束默认为每个层级节点最多 `3` 个 chunk、每篇论文最多 `6` 个 chunk；候选不足时再放宽约束补齐。
+- 在线结果统一暴露 `rewritten_query`、`entry_nodes`、`retrieval_paths`、`final_chunks`、`chunk_scores` 和 `query_type`，同时保留旧 `answer` / `sources` / `debug_info` 字段。
 - 以上均为在线逻辑修改，可直接复用已有 FAISS、KG、hierarchy 和 node embedding，不要求重建离线索引。
 
 对应入口：
@@ -98,6 +103,7 @@ Query Embedding
 - `paper_assistant_rag/archrag/hierarchy_builder.py`：Algorithm 1 风格迭代层级 community 构建。
 - `paper_assistant_rag/archrag/hierarchical_index.py`：C-HNSW-like hierarchical index facade。
 - `paper_assistant_rag/archrag/hierarchical_retriever.py`：多层 entity/community 检索。
+- `paper_assistant_rag/archrag/query_processing.py`：LLM query rewrite、query type 归一化、adaptive beam 和 rerank weight 策略。
 - `paper_assistant_rag/archrag/adaptive_filter.py`：adaptive filtering report + final merge generation。
 
 ### ArchRAG 底层兼容模块
@@ -142,6 +148,10 @@ Query Embedding
 - `build_hierarchical_communities()`：迭代 attributed community hierarchy。
 - `build_archrag_index()`：C-HNSW-like layer links。
 - `hierarchical_search()`：父节点约束的 top-down beam retrieval。
+- `rewrite_query()`：结合最近会话历史，将本轮追问转换为带 `standalone_query` 的结构化检索查询；历史只用于语义消解。
+- `select_entry_nodes()`：在 top layer 全量节点中选择 query-aware multiple entry points。
+- `get_beam_width()`：按 query type 和 hierarchy depth 计算逐层 beam width。
+- `get_rerank_weights()`：按 query type 生成 chunk rerank 动态权重。
 - `rerank_archrag_chunks()`：回到原始 FAISS chunk，执行 query-aware 语义 / 路径 / 关键词重排和多样性约束。
 - `generate_archrag_answer()`：hierarchical beam search -> chunk rerank -> adaptive filtering -> final answer。
 - `PaperAssistantService.ask()`：UI / 非 CLI 入口的稳定问答接口，返回 answer、sources、retrieval、filter_reports 和 metadata。

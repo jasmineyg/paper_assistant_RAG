@@ -9,3 +9,4 @@ data/*
 !data/eval/**
 data/eval/runs/
 vectorstore/faiss_index/
+/tests/

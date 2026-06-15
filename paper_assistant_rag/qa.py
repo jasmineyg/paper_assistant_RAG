@@ -12,12 +12,14 @@ from langchain_core._api.deprecation import LangChainDeprecationWarning
 from langchain_classic.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.documents import Document
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
 from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from openai import OpenAIError
 
 from paper_assistant_rag.archrag.pipeline import ArchRAGPipeline
+from paper_assistant_rag.archrag.query_processing import build_retrieval_query, rewrite_query
 from paper_assistant_rag.archrag_generation import generate_archrag_answer, rerank_archrag_chunks
 from paper_assistant_rag.archrag_index import hierarchical_search_by_embedding
 from paper_assistant_rag.archrag_index import load_archrag_index
@@ -138,6 +140,8 @@ def ask_question(
             index_dir=index_dir,
             archrag_dir=archrag_dir,
             settings=settings,
+            memory_db=memory_db,
+            session_id=session_id,
             final_chunk_limit=k,
             top_k_per_level=top_k_per_level,
             show_archrag_debug=show_archrag_debug,
@@ -203,6 +207,8 @@ def ask_archrag_question(
     index_dir: Path,
     archrag_dir: Path,
     settings: Settings,
+    memory_db: Path,
+    session_id: str,
     final_chunk_limit: int,
     top_k_per_level: int,
     show_archrag_debug: bool,
@@ -219,6 +225,12 @@ def ask_archrag_question(
     llm = build_llm(settings)
     embeddings = build_embeddings(settings)
     vectorstore = load_index(index_dir, settings)
+    history = get_session_history(
+        session_id=session_id,
+        db_path=memory_db,
+        max_messages=MAX_HISTORY_MESSAGES,
+    )
+    chat_history = list(history.messages)
     try:
         with console.status("[cyan]Running hierarchical ArchRAG search and adaptive filtering...[/cyan]", spinner="dots"):
             result = generate_archrag_answer(
@@ -230,6 +242,7 @@ def ask_archrag_question(
                 top_k_per_level=top_k_per_level,
                 max_levels=max_levels,
                 final_chunk_limit=final_chunk_limit,
+                chat_history=chat_history,
             )
     except (OpenAIError, HTTPError) as error:
         print_model_error(error, settings)
@@ -237,6 +250,12 @@ def ask_archrag_question(
 
     console.print("\n[bold]Answer[/bold]")
     print_answer(str(result["answer"]))
+    history.add_messages(
+        [
+            HumanMessage(content=question),
+            AIMessage(content=str(result["answer"])),
+        ]
+    )
     console.print()
     print_sources(result["sources"], show_snippets=show_snippets)
     if show_archrag_debug:
@@ -351,21 +370,26 @@ def build_hybrid_retriever(
                     raise RetrievalServiceError("archrag retrieval requires archrag_dir")
                 arch_index = load_archrag_index(archrag_dir)
                 embeddings = build_embeddings(Settings.from_env())
-                query_embedding = [float(value) for value in embeddings.embed_query(query)]
+                rewritten_query = rewrite_query(query, llm=llm)
+                retrieval_query = build_retrieval_query(rewritten_query)
+                query_type = str(rewritten_query["query_type"])
+                query_embedding = [float(value) for value in embeddings.embed_query(retrieval_query)]
                 search_result = hierarchical_search_by_embedding(
                     arch_index=arch_index,
                     query_embedding=query_embedding,
-                    query=query,
+                    query=retrieval_query,
                     top_k_per_level=top_k_per_level,
                     max_levels=max_levels,
+                    query_type=query_type,
                 )
                 selected_results = rerank_archrag_chunks(
-                    query=query,
+                    query=retrieval_query,
                     level_results=search_result["level_results"],
                     vectorstore=vectorstore,
                     embeddings=embeddings,
                     limit=k,
                     query_embedding=query_embedding,
+                    query_type=query_type,
                 )
             elif mode == "archrag-lite":
                 if graph_dir is None or community_index_dir is None:
@@ -485,6 +509,29 @@ def print_archrag_debug(debug_info: dict, arch_index) -> None:
     console.print(f"hierarchy levels: {len(layer_counts)}")
     console.print(f"nodes per level: {layer_counts}")
     search = debug_info.get("search", {})
+    rewritten_query = debug_info.get("rewritten_query", {})
+    if rewritten_query:
+        console.print(f"query type: {safe_for_console(str(debug_info.get('query_type', 'fact')))}")
+        console.print(
+            "standalone query: "
+            + safe_for_console(str(rewritten_query.get("standalone_query", "")))
+        )
+        console.print(
+            "rewritten entities: "
+            + safe_for_console(", ".join(str(item) for item in rewritten_query.get("entities", [])))
+        )
+    entry_nodes = debug_info.get("entry_nodes", [])
+    if entry_nodes:
+        console.print(
+            "entry nodes: "
+            + ", ".join(
+                safe_for_console(f"{row.get('node_id')}={float(row.get('score', 0.0)):.4f}")
+                for row in entry_nodes
+            )
+        )
+    beam_widths = search.get("beam_widths", {})
+    if beam_widths:
+        console.print(f"beam widths: {beam_widths}")
     level_results = search.get("level_results", {})
     for level in sorted(level_results, reverse=True):
         console.print(f"level {level} top nodes:")

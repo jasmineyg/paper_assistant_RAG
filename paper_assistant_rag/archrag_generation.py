@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
 from langchain_core.documents import Document
 
+from paper_assistant_rag.archrag.query_processing import (
+    build_retrieval_query,
+    get_rerank_weights,
+    rewrite_query,
+)
 from paper_assistant_rag.archrag_index import hierarchical_search_by_embedding
 from paper_assistant_rag.archrag_types import ArchIndex
 from paper_assistant_rag.retrieval import clean_model_output, normalize_text
@@ -120,24 +126,32 @@ def generate_archrag_answer(
     top_k_per_level: int = 5,
     max_levels: int | None = None,
     final_chunk_limit: int = 10,
+    entry_k: int = 3,
+    chat_history: Sequence[Any] | None = None,
 ) -> dict[str, Any]:
     """Run hierarchical search, adaptive filtering, and final answer merging."""
-    query_embedding = [float(value) for value in embeddings.embed_query(query)]
+    rewritten_query = rewrite_query(query, llm=llm, chat_history=chat_history)
+    query_type = str(rewritten_query["query_type"])
+    retrieval_query = build_retrieval_query(rewritten_query)
+    query_embedding = [float(value) for value in embeddings.embed_query(retrieval_query)]
     search_result = hierarchical_search_by_embedding(
         arch_index=arch_index,
         query_embedding=query_embedding,
-        query=query,
+        query=retrieval_query,
         top_k_per_level=top_k_per_level,
         max_levels=max_levels,
+        query_type=query_type,
+        entry_k=entry_k,
     )
     reranked_documents = (
         rerank_archrag_chunks(
-            query=query,
+            query=retrieval_query,
             level_results=search_result["level_results"],
             vectorstore=vectorstore,
             embeddings=embeddings,
             limit=final_chunk_limit,
             query_embedding=query_embedding,
+            query_type=query_type,
         )
         if vectorstore is not None
         else archrag_level_results_to_documents(
@@ -158,14 +172,26 @@ def generate_archrag_answer(
         response_format="Structured Chinese answer with explicit [S#] citations",
         source_rows_override=source_rows,
     )
+    chunk_scores = _chunk_score_rows(reranked_documents)
     return {
         "answer": merged["answer"],
         "sources": merged["sources"],
+        "rewritten_query": rewritten_query,
+        "entry_nodes": search_result.get("entry_nodes", []),
+        "retrieval_paths": search_result.get("retrieval_paths", []),
+        "final_chunks": source_rows,
+        "chunk_scores": chunk_scores,
+        "query_type": query_type,
         "debug_info": {
             "search": search_result,
             "reports": reports,
             "points": merged["points"],
             "used_source_chunks": [row["stable_chunk_id"] for row in merged["sources"]],
+            "rewritten_query": rewritten_query,
+            "entry_nodes": search_result.get("entry_nodes", []),
+            "retrieval_paths": search_result.get("retrieval_paths", []),
+            "chunk_scores": chunk_scores,
+            "query_type": query_type,
         },
     }
 
@@ -220,12 +246,13 @@ def rerank_archrag_chunks(
     vectorstore,
     embeddings,
     limit: int,
-    semantic_weight: float = CHUNK_SEMANTIC_WEIGHT,
-    hierarchy_weight: float = HIERARCHY_NODE_WEIGHT,
-    keyword_weight: float = KEYWORD_WEIGHT,
+    semantic_weight: float | None = None,
+    hierarchy_weight: float | None = None,
+    keyword_weight: float | None = None,
     max_chunks_per_node: int = DEFAULT_MAX_CHUNKS_PER_NODE,
     max_chunks_per_paper: int = DEFAULT_MAX_CHUNKS_PER_PAPER,
     query_embedding: list[float] | np.ndarray | None = None,
+    query_type: str | None = None,
 ) -> list[tuple[Document, float]]:
     """Rerank source chunks using query semantics, hierarchy score, and keywords."""
     if limit <= 0:
@@ -237,6 +264,12 @@ def rerank_archrag_chunks(
     query_embedding = np.asarray(
         embeddings.embed_query(query) if query_embedding is None else query_embedding,
         dtype=np.float32,
+    )
+    weights = _resolve_rerank_weights(
+        query_type=query_type,
+        semantic_weight=semantic_weight,
+        hierarchy_weight=hierarchy_weight,
+        keyword_weight=keyword_weight,
     )
     query_terms = _query_terms(query)
     candidates: dict[str, dict[str, Any]] = {}
@@ -270,9 +303,9 @@ def rerank_archrag_chunks(
         semantic_score_01 = _cosine_to_unit_interval(semantic_score)
         keyword_score = _keyword_relevance(query_terms, document.page_content)
         final_score = (
-            semantic_weight * semantic_score_01
-            + hierarchy_weight * float(candidate["node_score_01"])
-            + keyword_weight * keyword_score
+            weights["semantic"] * semantic_score_01
+            + weights["hierarchy"] * float(candidate["node_score_01"])
+            + weights["keyword"] * keyword_score
         )
         node = candidate["node"]
         metadata = dict(document.metadata)
@@ -284,8 +317,12 @@ def rerank_archrag_chunks(
                 "archrag_node_type": str(node.get("node_type", "")),
                 "archrag_node_score": f"{float(candidate['node_score']):.6f}",
                 "chunk_semantic_score": f"{semantic_score:.6f}",
+                "chunk_semantic_score_01": f"{semantic_score_01:.6f}",
+                "chunk_hierarchy_score": f"{float(candidate['node_score_01']):.6f}",
                 "chunk_keyword_score": f"{keyword_score:.6f}",
                 "chunk_relevance_score": f"{final_score:.6f}",
+                "chunk_rerank_weights_json": json.dumps(weights, sort_keys=True),
+                "query_type": query_type or "legacy",
                 "community_id": str(node.get("node_id", "")),
             }
         )
@@ -304,6 +341,58 @@ def rerank_archrag_chunks(
         max_chunks_per_node=max_chunks_per_node,
         max_chunks_per_paper=max_chunks_per_paper,
     )
+
+
+def _resolve_rerank_weights(
+    query_type: str | None,
+    semantic_weight: float | None,
+    hierarchy_weight: float | None,
+    keyword_weight: float | None,
+) -> dict[str, float]:
+    """Resolve dynamic defaults while preserving explicit legacy overrides."""
+    defaults = (
+        get_rerank_weights(query_type)
+        if query_type is not None
+        else {
+            "semantic": CHUNK_SEMANTIC_WEIGHT,
+            "hierarchy": HIERARCHY_NODE_WEIGHT,
+            "keyword": KEYWORD_WEIGHT,
+        }
+    )
+    return {
+        "semantic": float(defaults["semantic"] if semantic_weight is None else semantic_weight),
+        "hierarchy": float(defaults["hierarchy"] if hierarchy_weight is None else hierarchy_weight),
+        "keyword": float(defaults["keyword"] if keyword_weight is None else keyword_weight),
+    }
+
+
+def _chunk_score_rows(
+    ranked_documents: list[tuple[Document, float]],
+) -> list[dict[str, Any]]:
+    """Expose final and component scores in a stable JSON-friendly structure."""
+    rows: list[dict[str, Any]] = []
+    for document, score in ranked_documents:
+        metadata = document.metadata
+        try:
+            weights = json.loads(str(metadata.get("chunk_rerank_weights_json", "{}")))
+        except json.JSONDecodeError:
+            weights = {}
+        rows.append(
+            {
+                "stable_chunk_id": str(metadata.get("stable_chunk_id", "")),
+                "score": float(score),
+                "semantic": float(
+                    metadata.get(
+                        "chunk_semantic_score_01",
+                        metadata.get("chunk_semantic_score", 0.0),
+                    )
+                ),
+                "hierarchy": float(metadata.get("chunk_hierarchy_score", 0.0)),
+                "keyword": float(metadata.get("chunk_keyword_score", 0.0)),
+                "weights": weights,
+            }
+        )
+    return rows
 
 
 def _level_evidence_text(evidence_lookup: dict[str, dict[str, Any]]) -> str:

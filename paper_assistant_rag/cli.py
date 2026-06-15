@@ -326,7 +326,11 @@ def ask_command(
     ] = "archrag",
     top_k_per_level: Annotated[
         int,
-        typer.Option("--top-k-per-level", min=1, help="ArchRAG hierarchical search results kept at each level."),
+        typer.Option(
+            "--top-k-per-level",
+            min=1,
+            help="Minimum ArchRAG candidates kept per level; adaptive beam width may keep more.",
+        ),
     ] = 5,
     show_archrag_debug: Annotated[
         bool,
@@ -455,7 +459,11 @@ def eval_command(
     ] = "archrag",
     top_k_per_level: Annotated[
         int,
-        typer.Option("--top-k-per-level", min=1, help="ArchRAG hierarchical search results kept at each level."),
+        typer.Option(
+            "--top-k-per-level",
+            min=1,
+            help="Minimum ArchRAG candidates kept per level; adaptive beam width may keep more.",
+        ),
     ] = 5,
     max_levels: Annotated[
         int | None,

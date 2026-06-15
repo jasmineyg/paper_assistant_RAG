@@ -30,19 +30,35 @@ class HierarchicalIndex:
         """Load a persisted hierarchy index from disk."""
         return cls(load_archrag_index(archrag_dir))
 
-    def search(self, query_embedding: list[float], top_k_per_level: int) -> dict[str, list[dict[str, Any]]]:
+    def search(
+        self,
+        query_embedding: list[float],
+        top_k_per_level: int,
+        query_type: str = "fact",
+        entry_k: int = 3,
+    ) -> dict[str, list[dict[str, Any]]]:
         """Search each level using an already-computed query embedding."""
         search_result = hierarchical_search_by_embedding(
             arch_index=self.index,
             query_embedding=query_embedding,
             top_k_per_level=top_k_per_level,
+            query_type=query_type,
+            entry_k=entry_k,
         )
         return {
             f"level_{level}": rows
             for level, rows in search_result["level_results"].items()
         }
 
-    def search_text(self, query: str, embeddings, top_k_per_level: int, max_levels: int | None = None) -> dict[str, Any]:
+    def search_text(
+        self,
+        query: str,
+        embeddings,
+        top_k_per_level: int,
+        max_levels: int | None = None,
+        query_type: str = "fact",
+        entry_k: int = 3,
+    ) -> dict[str, Any]:
         """Embed a query and run top-down hierarchical search."""
         return hierarchical_search(
             arch_index=self.index,
@@ -50,6 +66,8 @@ class HierarchicalIndex:
             embeddings=embeddings,
             top_k_per_level=top_k_per_level,
             max_levels=max_levels,
+            query_type=query_type,
+            entry_k=entry_k,
         )
 
 
